@@ -47,3 +47,38 @@ m-explore-ros2 (BSD). Recorded in THIRD_PARTY.md. We build our OWN simulator (av
 
 ### Next
 P1 lightweight simulator (no ROS).
+
+## Phase 1 — Lightweight simulator (DONE, acceptance PASSED)
+
+### Built
+- `sim/map_gen.py` — procedural collapsed-building generator: rooms + corridors + narrow gaps
+  (rover-only) + rubble (rover-only, slow) + survivors with explicit sensor profiles
+  (open/quiet = thermal; buried-in-rubble = acoustic-only). Every survivor detectable by >=1 modality.
+- `sim/env.py` — heterogeneous grid env: drones (fast, wide thermal, short battery) vs rovers
+  (slow, narrow thermal + acoustic, longer battery); passive sensing; peer-to-peer comms sharing
+  within range; BFS goal-following; collision handling; battery drain.
+- `sim/sensors.py` — thermal (FOV + LOS + distance + noise; coarse for drones) and acoustic
+  (distance + per-wall attenuation + noise) models.
+- `sim/baselines.py` — random, nearest-frontier, explore-lite frontier policies.
+- `sim/metrics.py` + `sim/run_baselines.py` — metrics (coverage %, survivors found, first/all-found
+  step, collisions), table + plot output to `results/p1_baselines.png`.
+
+### Acceptance test P1 — PASSED
+Command: `python3 -m sim.run_baselines --seeds 0 1 2 --drones 2 --rovers 2 --max-steps 300`
+Ran on 3 map seeds, metrics printed and plotted. Runtime ~2.4 s total.
+
+Results (2 drones + 2 rovers, 40x40, 6 survivors):
+| baseline | avg cov% | avg surv% | avg first@ | avg all@ | avg collisions |
+|---|---|---|---|---|---|
+| random | 78.9 | 100 | 5 | 104 | 4.3 |
+| nearest_frontier | 75.3 | 100 | 4 | 56 | 2.7 |
+| explore_lite | 81.8 | 100 | 4 | 76 | 2.0 |
+
+### Known issues / notes
+- Maps are "easy" (all baselines find all survivors). For P2/P3 I'll make it harder
+  (larger maps, more/buried survivors, shorter comms range) so MARL has room to win on
+  time-to-all, coverage efficiency, and collisions.
+- Movement is grid-step based; drones 2 cells/step, rovers 1 (0.5 through rubble).
+
+### Next
+P2: MARL + GNN training (custom PPO + PyTorch Geometric; separate venv with torch).

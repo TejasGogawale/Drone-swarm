@@ -1,0 +1,4 @@
+# Phase 1 (lightweight sim) dependencies — use system python3 (numpy/matplotlib already present)
+numpy>=1.26
+matplotlib>=3.6
+# Phase 2+ (ML training) uses a SEPARATE venv: see train/requirements.txt (torch, torch_geometric)
