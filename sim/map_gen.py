@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import numpy as np
 from dataclasses import dataclass, field
+import math
 
 FREE = 0
 WALL = 1
@@ -36,7 +37,9 @@ class Survivor:
     sound: bool = True    # detectable by acoustic (sound travels through walls)
     loudness: float = 1.0
     found: bool = False   # set when first detected by any robot
-    found_by: set = field(default_factory=set)  # robot ids that detected it
+    confirmed: bool = False  # set when detected by a 2nd robot or 2nd sensor type
+    found_by: set = field(default_factory=set)     # robot ids that detected it
+    detected_via: set = field(default_factory=set)  # {'thermal','acoustic'} seen
 
 
 @dataclass
@@ -76,6 +79,8 @@ def generate_building(
     n_narrow: int = 3,
     n_rubble: int = 8,
     n_survivors: int = 6,
+    min_entry_dist: int = 12,
+    min_pair_dist: int = 4,
 ) -> BuildingMap:
     """Generate a labyrinthine collapsed building with rooms, corridors, narrow
     gaps, rubble patches and survivors with heat/sound attributes."""
@@ -133,8 +138,13 @@ def generate_building(
     #      -> detectable by thermal (drones wide / rovers narrow).
     #    - "buried" (under rubble): heat hidden (heat=False), sound=True
     #      -> detectable only by rover ACOUSTIC (sound travels through debris).
+    #    Survivors are placed away from the entry point and spread apart so that
+    #    exploration actually matters (a policy must search, not just spawn-detect).
+    entry = _entry_cell(grid)
     rubble_cells = np.argwhere(grid == RUBBLE)
     open_cells = np.argwhere(np.isin(grid, [FREE, NARROW]))
+    rubble_cells = _far_from_entry(rubble_cells, entry, min_entry_dist)
+    open_cells = _far_from_entry(open_cells, entry, min_entry_dist)
     rng.shuffle(rubble_cells)
     rng.shuffle(open_cells)
 
@@ -144,16 +154,27 @@ def generate_building(
         n_open = len(open_cells)
         n_buried = min(len(rubble_cells), n_survivors - n_open)
 
-    placements = []  # (x, y, kind)
+    # build a candidate pool, then greedily pick with min pairwise separation
+    cands = []
     for y, x in rubble_cells[:n_buried]:
-        placements.append((int(x), int(y), "buried"))
+        cands.append((int(x), int(y), "buried"))
     for y, x in open_cells[:n_open]:
-        placements.append((int(x), int(y), "open"))
-    # top up if we ran short (rare)
-    if len(placements) < n_survivors and len(open_cells) > n_open:
-        for y, x in open_cells[n_open:n_open + (n_survivors - len(placements))]:
-            placements.append((int(x), int(y), "open"))
-    rng.shuffle(placements)
+        cands.append((int(x), int(y), "open"))
+    rng.shuffle(cands)
+
+    placements = []
+    for c in cands:
+        if len(placements) >= n_survivors:
+            break
+        cx, cy, _ = c
+        if all(math.hypot(cx - px, cy - py) >= min_pair_dist for (px, py, _) in placements):
+            placements.append(c)
+    # if we couldn't satisfy separation, just fill from cands
+    for c in cands:
+        if len(placements) >= n_survivors:
+            break
+        if c not in placements:
+            placements.append(c)
 
     survivors = []
     for i, (x, y, kind) in enumerate(placements[:n_survivors]):
@@ -166,6 +187,23 @@ def generate_building(
                                       loudness=float(rng.uniform(0.6, 1.0))))
 
     return BuildingMap(grid=grid, survivors=survivors)
+
+
+def _entry_cell(grid):
+    """Top-left-most rover-traversable cell (matches env._entry_point)."""
+    ys, xs = np.where(np.isin(grid, [FREE, NARROW, RUBBLE]))
+    if len(xs) == 0:
+        return (0, 0)
+    i = int(np.argmin(ys + xs))
+    return (int(xs[i]), int(ys[i]))
+
+
+def _far_from_entry(cells, entry, min_dist):
+    if len(cells) == 0:
+        return cells
+    ex, ey = entry
+    keep = [c for c in cells if math.hypot(c[1] - ex, c[0] - ey) >= min_dist]
+    return np.array(keep, dtype=cells.dtype) if keep else cells
 
 
 def _carve_corridor(grid, x1, y1, x2, y2, cell_type) -> None:

@@ -1,0 +1,4 @@
+# Phase 2+ ML training (separate venv: .venv)
+torch>=2.1
+numpy>=1.26
+matplotlib>=3.6

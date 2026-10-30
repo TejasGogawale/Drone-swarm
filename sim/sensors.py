@@ -79,10 +79,12 @@ def thermal_detect(bmap: BuildingMap, ax, ay, aheading, sx, sy, *,
 
 
 def acoustic_observe(bmap: BuildingMap, ax, ay, sx, sy, loudness: float,
-                     rng: np.random.Generator) -> float | None:
-    """Return observed loudness of a sound source, or None if below threshold.
-    Sound attenuates with distance and number of walls crossed."""
+                     rng: np.random.Generator, max_range: float = 10.0) -> float | None:
+    """Return observed loudness of a sound source, or None if below threshold or
+    beyond max_range. Sound attenuates with distance and number of walls crossed."""
     dist = max(0.5, math.hypot(sx - ax, sy - ay))
+    if dist > max_range:
+        return None
     walls = _walls_between(bmap, ax, ay, sx, sy)
     # inverse-square-ish distance attenuation in dB + per-wall attenuation
     atten_db = 20.0 * math.log10(dist) + walls * 12.0

@@ -60,6 +60,9 @@ class RescueEnv:
         self.collisions = 0
         self.first_found_step = None
         self.all_found_step = None
+        self._new_found = 0
+        self._new_confirmed = 0
+        self._step_collisions = 0
         self.reset()
 
     # ------------------------------------------------------------------ #
@@ -68,9 +71,13 @@ class RescueEnv:
         self.collisions = 0
         self.first_found_step = None
         self.all_found_step = None
+        self._new_found = 0
+        self._new_confirmed = 0
         for s in self.bmap.survivors:
             s.found = False
+            s.confirmed = False
             s.found_by = set()
+            s.detected_via = set()
         H, W = self.bmap.H, self.bmap.W
         self.agents = []
         entry = self._entry_point()
@@ -170,24 +177,35 @@ class RescueEnv:
                         ag.explored[yy, xx] = True
         # survivor detection
         for s in self.bmap.survivors:
-            if s.found:
+            if s.found and s.confirmed:
                 continue
             sx, sy = s.pos
             detected = False
+            modality = None
             if spec["thermal"] and s.heat:
                 if thermal_detect(self.bmap, ax, ay, ag.heading, sx, sy,
                                   sensor_range=spec["sensor_range"], fov_deg=spec["fov_deg"],
                                   rng=self.rng, coarse=spec["coarse"]):
                     detected = True
+                    modality = "thermal"
             if spec["acoustic"] and s.sound and not detected:
                 obs = acoustic_observe(self.bmap, ax, ay, sx, sy, s.loudness, self.rng)
                 if obs is not None and obs >= ACOUSTIC_THRESHOLD:
                     detected = True
+                    modality = "acoustic"
             if detected:
-                s.found = True
-                s.found_by.add(ag.id)
-                if self.first_found_step is None:
-                    self.first_found_step = self.step_count
+                if not s.found:
+                    s.found = True
+                    self._new_found += 1
+                    if self.first_found_step is None:
+                        self.first_found_step = self.step_count
+                if ag.id not in s.found_by:
+                    s.found_by.add(ag.id)
+                s.detected_via.add(modality)
+                # "confirmed" = seen by a 2nd robot OR a 2nd sensor type
+                if not s.confirmed and (len(s.found_by) >= 2 or len(s.detected_via) >= 2):
+                    s.confirmed = True
+                    self._new_confirmed += 1
         # update known survivor ids
         for s in self.bmap.survivors:
             if s.found:
@@ -235,6 +253,7 @@ class RescueEnv:
             if p in seen:
                 # keep first, the other waits (restored to its original position)
                 self.collisions += 1
+                self._step_collisions += 1
                 new_positions[i] = orig_positions[i]
             else:
                 seen[p] = i
@@ -242,9 +261,15 @@ class RescueEnv:
 
     # ------------------------------------------------------------------ #
     def step(self, goals):
-        """goals: list of (x,y) goal cells (or None to hold) per agent."""
+        """goals: list of (x,y) goal cells (or None to hold) per agent.
+        Returns (obs, reward, done, info). Reward is a shaped TEAM reward."""
         if self.step_count >= self.max_steps:
             return self._observe(), 0.0, True, self._info()
+
+        # reset per-step event counters
+        self._new_found = 0
+        self._new_confirmed = 0
+        self._step_collisions = 0
 
         for ag, g in zip(self.agents, goals):
             if not ag.alive:
@@ -275,7 +300,7 @@ class RescueEnv:
         self._comms()
 
         after = self.union_explored_count()
-        reward = float(after - before)
+        reward = self._shaped_reward(after - before)
 
         self.step_count += 1
 
@@ -285,6 +310,30 @@ class RescueEnv:
 
         done = all_found or all(not ag.alive for ag in self.agents) or self.step_count >= self.max_steps
         return self._observe(), reward, done, self._info()
+
+    def _shaped_reward(self, explored_delta):
+        """Team reward combining exploration, discovery, confirmation, and costs."""
+        w_explore = 0.1
+        w_found = 5.0
+        w_confirm = 3.0
+        w_collision = -0.5
+        w_time = -0.02
+        w_overlap = -0.05
+
+        r = w_explore * explored_delta
+        r += w_found * self._new_found
+        r += w_confirm * self._new_confirmed
+        r += w_collision * self._step_collisions
+        r += w_time
+        # overlap penalty: pairs of same-type agents within 2 cells
+        for i in range(len(self.agents)):
+            for j in range(i + 1, len(self.agents)):
+                ai, aj = self.agents[i], self.agents[j]
+                if ai.alive and aj.alive:
+                    d = math.hypot(ai.pos[0] - aj.pos[0], ai.pos[1] - aj.pos[1])
+                    if d < 2.0:
+                        r += w_overlap
+        return float(r)
 
     # ------------------------------------------------------------------ #
     def union_explored(self):
@@ -310,6 +359,7 @@ class RescueEnv:
         return {
             "coverage": self.coverage(),
             "survivors_found": len(self.survivors_found()),
+            "survivors_confirmed": len([s for s in self.bmap.survivors if s.confirmed]),
             "survivors_total": len(self.bmap.survivors),
             "first_found_step": self.first_found_step,
             "all_found_step": self.all_found_step,
