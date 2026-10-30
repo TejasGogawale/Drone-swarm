@@ -37,6 +37,6 @@ end-to-end working system, scalability, real-world applicability.
 
 ## Stack (from Phase 0 detection)
 - Ubuntu 24.04.5 LTS, ROS 2 **Jazzy**, Gazebo **Harmonic (gz sim 8.15)**.
-- RAM 7.5 GiB total (LOW) → live Gazebo: 1 drone + 1 rover max (headless); scalability in lightweight sim.
+- RAM 7.5 GiB total (LOW) → live Gazebo: **2 drones + 2 rovers, headless** (user's choice; watch RAM, be ready to fall back); scalability (10+) in lightweight sim.
 - GPU: RTX 2050 (4 GiB VRAM) for training; CPU (12 cores) fallback.
-- LLM: default rule-based fallback; Ollama/cloud optional via env var.
+- LLM: **Groq cloud API** (`qwen/qwen3.8-27b`, key in `.env`, verified); fallback = rule-based allocator.

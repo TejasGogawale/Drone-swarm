@@ -41,8 +41,9 @@ m-explore-ros2 (BSD). Recorded in THIRD_PARTY.md. We build our OWN simulator (av
 - ROS 2 Jazzy + Gazebo Harmonic (existing, untouched).
 - Lightweight sim: **custom pure-Python** (numpy; torch for GNN in P2), NOT VMAS/hemac (faster + no license risk).
 - MARL: custom PPO (torch) + PyTorch Geometric GNN (small models; GPU 4GB or CPU).
-- LLM commander: **rule-based fallback default** (Ollama absent, RAM too tight); cloud/local via env.
-- Robot counts (live Gazebo): **1 drone + 1 rover, headless** (RAM-limited). Lightweight sim: 3/6/10+.
+- LLM commander: **Groq cloud API** — `qwen/qwen3.8-27b`, key in `.env` (verified working). Fallback = rule-based.
+- Robot counts (live Gazebo): **2 drones + 2 rovers, headless** (user's choice). Lightweight sim: 3/6/10+.
+- Deadline: 48 h (assumed).
 
 ### Next
 P1 lightweight simulator (no ROS).
