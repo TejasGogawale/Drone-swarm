@@ -47,19 +47,22 @@ def act(model, obs, device, deterministic=False):
 
 
 def compute_gae(rewards, values, dones, gamma, lam):
-    """rewards/values/dones: lists over T (per env). Returns advantages, returns."""
-    T = len(rewards)
-    adv = np.zeros_like(rewards, dtype=np.float32)
-    returns = np.zeros_like(rewards, dtype=np.float32)
-    last_adv = 0.0
-    last_val = 0.0
+    """rewards/values/dones: lists over T, each element shape [B].
+    Returns advantages and returns as [T, B] arrays (GAE per env)."""
+    r = np.asarray(rewards, dtype=np.float32)    # [T, B]
+    v = np.asarray(values, dtype=np.float32)
+    d = np.asarray(dones, dtype=np.float32)      # 1.0 if done
+    T, B = r.shape
+    adv = np.zeros_like(r)
+    last_adv = np.zeros(B, dtype=np.float32)
+    next_val = np.zeros(B, dtype=np.float32)
     for t in reversed(range(T)):
-        next_val = 0.0 if t == T - 1 else values[t + 1]
-        nonterm = 0.0 if dones[t] else 1.0
-        delta = rewards[t] + gamma * next_val * nonterm - values[t]
+        nonterm = 1.0 - d[t]                     # [B]
+        delta = r[t] + gamma * next_val * nonterm - v[t]
         last_adv = delta + gamma * lam * nonterm * last_adv
         adv[t] = last_adv
-        returns[t] = adv[t] + values[t]
+        next_val = v[t]
+    returns = adv + v
     return adv, returns
 
 

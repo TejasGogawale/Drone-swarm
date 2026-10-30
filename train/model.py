@@ -16,26 +16,35 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-def _scatter_mean(src: torch.Tensor, index: torch.Tensor, dim_size: int) -> torch.Tensor:
-    """Mean-aggregate `src` into `dim_size` rows indexed by `index` (pure torch)."""
+def _scatter_mean(src: torch.Tensor, index: torch.Tensor, dim_size: int,
+                  weight: torch.Tensor | None = None) -> torch.Tensor:
+    """(Weighted) mean-aggregate `src` into `dim_size` rows indexed by `index`."""
+    if weight is not None:
+        wsrc = src * weight.unsqueeze(-1)
+    else:
+        wsrc = src
     out = torch.zeros(dim_size, src.shape[1], dtype=src.dtype, device=src.device)
-    out.index_add_(0, index, src)
+    out.index_add_(0, index, wsrc)
+    if weight is not None:
+        cnt = torch.zeros(dim_size, 1, dtype=src.dtype, device=src.device)
+        cnt.index_add_(0, index, weight.unsqueeze(-1))
+        return out / cnt.clamp_min(1e-6)
     cnt = torch.zeros(dim_size, 1, dtype=src.dtype, device=src.device)
     cnt.index_add_(0, index, torch.ones_like(src[:, :1]))
     return out / cnt.clamp_min(1.0)
 
 
 class SAGELayer(nn.Module):
-    """GraphSAGE mean-aggregator layer (self + neighbor mean)."""
+    """GraphSAGE mean-aggregator layer (self + neighbor mean, comm-weighted)."""
     def __init__(self, in_d, out_d):
         super().__init__()
         self.lin = nn.Linear(in_d, out_d)
         self.lin_neigh = nn.Linear(in_d, out_d)
 
-    def forward(self, x, edge_index):
+    def forward(self, x, edge_index, edge_weight=None):
         # edge_index: [2, E], message flows src -> dst
         src, dst = edge_index
-        neigh = _scatter_mean(x[src], dst, x.shape[0])
+        neigh = _scatter_mean(x[src], dst, x.shape[0], edge_weight)
         return F.relu(self.lin(x) + self.lin_neigh(neigh))
 
 
@@ -74,25 +83,31 @@ class ActorCritic(nn.Module):
         h = self.drone_enc(agent_feats) * mask + self.rover_enc(agent_feats) * (1 - mask)
         return h                                        # [nA, hidden]
 
-    def _build_edge_index(self, nA, comm_adj, device):
-        """Build directed edge list for agents (0..nA-1) and goals (nA..nA+nA*NG-1)."""
-        rows, cols = [], []
-        # agent-agent (bidirectional)
-        idx = torch.nonzero(comm_adj > 0.5, as_tuple=False)
-        for i, j in idx.tolist():
-            rows += [i, j]
-            cols += [j, i]
-        # agent-goal (bidirectional): agent i <-> its NG goal nodes
+    def _build_edges(self, nA, comm_adj, device):
+        """Constant graph topology + dynamic comm weights (traceable).
+        Returns (edge_index [2,E], edge_weight [E]).
+        Agent-agent edges are weighted by comm_adj (0 = out of range, no message);
+        agent-goal edges are weighted 1."""
         NG = self.n_goals
+        rows, cols, weights = [], [], []
+        # agent-agent complete graph (message j -> i, weighted by comm_adj[i,j])
+        for i in range(nA):
+            for j in range(nA):
+                if i != j:
+                    rows.append(j)
+                    cols.append(i)
+                    weights.append(comm_adj[i, j])
+        # agent-goal bidirectional (weight 1)
         for i in range(nA):
             base = nA + i * NG
             for k in range(NG):
                 g = base + k
-                rows += [i, g]
-                cols += [g, i]
-        if not rows:
-            return torch.zeros((2, 0), dtype=torch.long, device=device)
-        return torch.tensor([rows, cols], dtype=torch.long, device=device)
+                rows += [g, i]
+                cols += [i, g]
+                weights += [comm_adj.new_ones(()), comm_adj.new_ones(())]
+        ei = torch.tensor([rows, cols], dtype=torch.long, device=device)
+        ew = torch.stack(weights)
+        return ei, ew
 
     def forward(self, agent_feats, goal_feats, goal_valid, type_ids, comm_adj, coverage):
         """Returns (logits [nA, NG] masked, value [1])."""
@@ -104,9 +119,9 @@ class ActorCritic(nn.Module):
 
         if self.use_gnn:
             x = torch.cat([hA, hG], dim=0)                      # [nA + nA*NG, hidden]
-            ei = self._build_edge_index(nA, comm_adj, device)
+            ei, ew = self._build_edges(nA, comm_adj, device)
             for conv in self.convs:
-                x = conv(x, ei)
+                x = conv(x, ei, ew)
             hA = x[:nA]
             hG = x[nA:]
         hG = hG.reshape(nA, NG, self.hidden)

@@ -119,6 +119,7 @@ def main(argv=None):
     ap.add_argument("--max-steps", type=int, default=100)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--hidden", type=int, default=64)
+    ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--gpu", action="store_true")
     ap.add_argument("--out", default="results")
     args = ap.parse_args(argv)
@@ -132,7 +133,7 @@ def main(argv=None):
     for tag, use_gnn in (("gnn", True), ("no_gnn", False)):
         print(f"\n===== training {tag} (use_gnn={use_gnn}) =====")
         model = ActorCritic(FA, FG, n_goals=N_GOALS, hidden=args.hidden, use_gnn=use_gnn).to(device)
-        ppo = PPO(model, lr=args.lr, device=device)
+        ppo = PPO(model, lr=args.lr, device=device, epochs=args.epochs)
         envs = [make_env(1000 + i, args.size, args.n_survivors, args.max_steps)
                 for i in range(args.envs)]
         curve = []
