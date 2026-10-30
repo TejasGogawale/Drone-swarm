@@ -114,3 +114,25 @@ P2: MARL + GNN training (custom PPO + PyTorch Geometric; separate venv with torc
 
 ### Acceptance test P2 (pending full run)
 - Training run in progress (40-iter validation first).
+
+## Phase 3 — 4-Drone Decentralized Swarm (GNN + Heuristic) & Multi-Camera Vision (COMPLETE)
+
+### Built & Verified
+1. **Heterogeneous 4-Drone Swarm in Gazebo Harmonic**:
+   - `start_all.sh` spawns 4 PX4 SITL instances (`-i 0..3`) with models `gz_x500_mono_cam` at staggered NED origins `(0,3,0)`, `(3,0,0)`, `(0,-3,0)`, `(-3,0,0)`.
+   - `drone_agent.launch.py` bridges all 4 cameras simultaneously via `ros_gz_bridge`:
+     - UAV-1 (`x500_mono_cam_0`) -> `/camera`
+     - UAV-2 (`x500_mono_cam_1`) -> `/uav_1/camera`
+     - UAV-3 (`x500_mono_cam_2`) -> `/uav_2/camera`
+     - UAV-4 (`x500_mono_cam_3`) -> `/uav_3/camera`
+2. **Decentralized Swarm Task Allocation (GNN + Heuristic Fallback)**:
+   - `swarm_gnn_allocator.py`: GraphSAGE GNN model loaded from `results/checkpoints/gnn.pt` (`FA=109`, `FG=5`, `N_GOALS=20`).
+   - Dynamically predicts goal affinity scores over mutual peer communication graph.
+   - Robust Heuristic Frontier & Sector Fallback when frontiers require geometric partitioning or network partitions occur.
+3. **Multi-Camera Visual GUI (`map_gui_node.py`)**:
+   - 2x2 Quad-Cam Grid displaying real-time feeds from all 4 drones with HUD telemetry (altitude, heading, speed, GNN/Heuristic task).
+   - Instant single-drone camera enlargement via top-bar buttons (`[4-CAM GRID]`, `[UAV-1 CAM]`, `[UAV-2 CAM]`, `[UAV-3 CAM]`, `[UAV-4 CAM]`) or direct clicking on camera feeds.
+   - Page 2 3D Collaborative OctoMap with 4-Cam PiP.
+4. **Collision Avoidance & Universal Offboard Control**:
+   - 6.5m inter-drone separation buffer and 3D obstacle avoidance around collapsed buildings in `command_translator.py`.
+   - Universal target system ID 0 for offboard trajectory setpoints.
