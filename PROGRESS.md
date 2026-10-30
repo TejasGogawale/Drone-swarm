@@ -28,8 +28,21 @@ Our project lives in `/home/tushar/Desktop/swarm` (separate). We will not modify
 - LLM commander: default **rule-based fallback allocator** (Ollama not installed, RAM too tight for 7B).
   Optional cloud/local via env var.
 
-### Acceptance test P0 (pending)
-- [ ] A Gazebo world runs and a camera topic is visible in ROS2 (via ros_gz_bridge).
+### Acceptance test P0 — PASSED
+- [x] Gazebo Harmonic world runs headless (`gz sim -r -s` on a camera world).
+- [x] Camera topic `/camera` (`sensor_msgs/msg/Image`) visible in ROS2 via `ros_gz_bridge`, ~30 Hz.
+- World kept at `ros_ws/src/worlds/p0_camera_test.sdf`.
 
-### Todo
-- Finish env detection, test Gazebo + camera bridge, clone key references, decide stack.
+### References cloned (~/refs, shallow) + licenses
+VMAS (GPLv3), PettingZoo (MIT), hemac (Thales Non-Production), IR2 (Apache-2.0),
+m-explore-ros2 (BSD). Recorded in THIRD_PARTY.md. We build our OWN simulator (avoid VMAS GPL).
+
+### Final stack decision
+- ROS 2 Jazzy + Gazebo Harmonic (existing, untouched).
+- Lightweight sim: **custom pure-Python** (numpy; torch for GNN in P2), NOT VMAS/hemac (faster + no license risk).
+- MARL: custom PPO (torch) + PyTorch Geometric GNN (small models; GPU 4GB or CPU).
+- LLM commander: **rule-based fallback default** (Ollama absent, RAM too tight); cloud/local via env.
+- Robot counts (live Gazebo): **1 drone + 1 rover, headless** (RAM-limited). Lightweight sim: 3/6/10+.
+
+### Next
+P1 lightweight simulator (no ROS).
