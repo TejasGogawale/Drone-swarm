@@ -26,9 +26,9 @@ def load_model(path, use_gnn, device):
     return model
 
 
-def eval_model(model, device, seed, size, n_survivors, max_steps):
+def eval_model(model, device, seed, size, n_survivors, max_steps, comm_range=7.0):
     bmap = generate_building(seed=seed, width=size, height=size, n_survivors=n_survivors)
-    env = RescueEnv(bmap, n_drones=2, n_rovers=2, comm_range=10.0, max_steps=max_steps, seed=seed)
+    env = RescueEnv(bmap, n_drones=2, n_rovers=2, comm_range=comm_range, max_steps=max_steps, seed=seed)
     cur = build_obs(env)
     done = False
     while not done:
@@ -54,9 +54,10 @@ def main(argv=None):
     ap.add_argument("--gnn", default="results/checkpoints/gnn.pt")
     ap.add_argument("--no-gnn", default="results/checkpoints/no_gnn.pt")
     ap.add_argument("--seeds", type=int, nargs="+", default=[3000, 3001, 3002])
-    ap.add_argument("--size", type=int, default=24)
-    ap.add_argument("--n-survivors", type=int, default=5)
-    ap.add_argument("--max-steps", type=int, default=100)
+    ap.add_argument("--size", type=int, default=28)
+    ap.add_argument("--n-survivors", type=int, default=6)
+    ap.add_argument("--max-steps", type=int, default=120)
+    ap.add_argument("--comm-range", type=float, default=7.0)
     ap.add_argument("--out", default="results")
     args = ap.parse_args(argv)
 
@@ -77,13 +78,13 @@ def main(argv=None):
         bmap = generate_building(seed=seed, width=args.size, height=args.size,
                                  n_survivors=args.n_survivors)
         for n in ["random", "nearest_frontier", "explore_lite"]:
-            env = RescueEnv(bmap, n_drones=2, n_rovers=2, comm_range=10.0,
+            env = RescueEnv(bmap, n_drones=2, n_rovers=2, comm_range=args.comm_range,
                             max_steps=args.max_steps, seed=seed)
             summary[n][seed] = run_episode(env, BASELINES[n], seed)["summary"]
         if gnn is not None:
-            summary["gnn"][seed] = eval_model(gnn, device, seed, args.size, args.n_survivors, args.max_steps)
+            summary["gnn"][seed] = eval_model(gnn, device, seed, args.size, args.n_survivors, args.max_steps, args.comm_range)
         if no_gnn is not None:
-            summary["no_gnn"][seed] = eval_model(no_gnn, device, seed, args.size, args.n_survivors, args.max_steps)
+            summary["no_gnn"][seed] = eval_model(no_gnn, device, seed, args.size, args.n_survivors, args.max_steps, args.comm_range)
 
     # print table
     print("\n" + "=" * 96)

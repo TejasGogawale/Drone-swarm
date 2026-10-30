@@ -24,9 +24,9 @@ from train.model import ActorCritic
 from train.ppo import PPO, act, forward_one
 
 
-def make_env(seed, size=24, n_survivors=5, max_steps=100):
+def make_env(seed, size=28, n_survivors=6, max_steps=120, comm_range=7.0):
     bmap = generate_building(seed=seed, width=size, height=size, n_survivors=n_survivors)
-    return RescueEnv(bmap, n_drones=2, n_rovers=2, comm_range=10.0,
+    return RescueEnv(bmap, n_drones=2, n_rovers=2, comm_range=comm_range,
                      max_steps=max_steps, seed=seed)
 
 
@@ -112,11 +112,11 @@ def export_actor(model, path):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--iters", type=int, default=300)
-    ap.add_argument("--rollout", type=int, default=80)
-    ap.add_argument("--envs", type=int, default=8)
-    ap.add_argument("--size", type=int, default=24)
-    ap.add_argument("--n-survivors", type=int, default=5)
-    ap.add_argument("--max-steps", type=int, default=100)
+    ap.add_argument("--rollout", type=int, default=60)
+    ap.add_argument("--envs", type=int, default=4)
+    ap.add_argument("--size", type=int, default=28)
+    ap.add_argument("--n-survivors", type=int, default=6)
+    ap.add_argument("--max-steps", type=int, default=120)
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--hidden", type=int, default=64)
     ap.add_argument("--epochs", type=int, default=5)
