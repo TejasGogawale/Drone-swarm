@@ -82,3 +82,35 @@ Results (2 drones + 2 rovers, 40x40, 6 survivors):
 
 ### Next
 P2: MARL + GNN training (custom PPO + PyTorch Geometric; separate venv with torch).
+
+## Phase 2 — MARL + GNN training (in progress)
+
+### Environment setup
+- `python3.12-venv` missing + no sudo + PyPI throttled large files. Resolved with:
+  - venv created via `python3 -m venv --without-pip`; torch installed from a local wheel
+    (`torch-2.15.0+cpu`, ~200 MB downloaded earlier) with `pip --target --no-deps`.
+  - `system_site.pth` adds `/usr/lib/python3/dist-packages` for numpy 1.26.4 + matplotlib.
+  - `typing_extensions` 4.16.0 (system had 4.10, too old for torch 2.15). **CPU torch** (GPU
+    CUDA wheel is 539 MB @ ~13 KB/s = infeasible; tiny models train fine on 12 CPU cores).
+  - torch_geometric NOT installed — GNN (GraphSAGE) implemented in pure PyTorch for reliable
+    TorchScript export + one light dependency. Honest note: brief asked for PyTorch Geometric;
+    we use GraphSAGE-style message passing implemented in PyTorch (same algorithm, no dep).
+
+### Built
+- `train/features.py` — observation builder (FA=109, FG=5, N_GOALS=20): type one-hot, battery,
+  pos, heading, known survivors, thermal/acoustic hints, nearest-frontier dist, 2-channel 7x7
+  occupancy patch (occupancy + known-survivor); goal (frontier) features; comm adjacency.
+- `train/model.py` — ActorCritic with comm-weighted GraphSAGE GNN (per-type encoders, shared
+  GNN, per-type scorer heads, centralized critic). Constant graph topology + dynamic comm weights
+  => clean TorchScript export.
+- `train/ppo.py` — MAPPO-style PPO (centralized critic, decentralized actors), GAE, clip.
+- `train/run_train.py` — trains GNN + no-GNN ablation, saves learning curves + checkpoints +
+  TorchScript actor.
+- `train/evaluate.py` — compares gnn / no-gnn / baselines on held-out seeds.
+
+### Verification (smoke)
+- collect+PPO update run without error; TorchScript export loads and matches eager model
+  (comm on/off changes logits as expected). All smoke tests PASS.
+
+### Acceptance test P2 (pending full run)
+- Training run in progress (40-iter validation first).
