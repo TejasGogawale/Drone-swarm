@@ -1,0 +1,33 @@
+# secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# ML training artifacts
+train/checkpoints/
+train/runs/
+*.pt
+*.pth
+*.onnx
+*.torchscript
+
+# ROS build
+ros_ws/build/
+ros_ws/install/
+ros_ws/log/
+
+# results (large)
+results/videos/
+results/*.mp4
+results/*.bag
+
+# misc
+*.log
+.DS_Store
