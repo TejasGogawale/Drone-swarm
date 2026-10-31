@@ -68,7 +68,7 @@ def generate_launch_description():
                 'model_path': LaunchConfiguration('yolo_model'),
                 'confidence_threshold': 0.5,
                 'camera_topic': LaunchConfiguration('camera_topic'),
-                'skip_frames': 2,
+                'skip_frames': 9,          # ~3 inferences/s per camera: YOLO on CPU at 10/s x4 starved PX4 (state estimate lost)
                 'gt_overlay': ParameterValue(LaunchConfiguration('gt_overlay'), value_type=bool),
             }],
         ),
@@ -89,13 +89,16 @@ def generate_launch_description():
             output='screen',
             parameters=[{
                 'llm_interval_sec': LaunchConfiguration('llm_interval'),
-                'offboard_rate_hz': 10.0,
+                'offboard_rate_hz': 25.0,
             }],
         ),
 
         # --- Live 2D Map + Annotated YOLO Camera GUI ---
         ExecuteProcess(
             cmd=[
+                # lowest priority: the GUI must never steal CPU from PX4/Gazebo (a starved PX4 instance
+                # lost its state estimate and flew away in one run)
+                'nice', '-n', '12',
                 '/usr/bin/python3',
                 '/home/tushar/Desktop/swarm/LLM-controlled-drone/src/drone_agent/drone_agent/map_gui_node.py',
             ],

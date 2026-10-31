@@ -13,6 +13,9 @@ fi
 
 export DISPLAY="${DISPLAY:-:0}"
 export GALLIUM_DRIVER=d3d12
+# WSL: Mesa's d3d12 driver picks adapter 0 (the Intel iGPU on Optimus laptops), which left the RTX unused
+# and Gazebo at ~0.1% real time. Select the NVIDIA adapter by name (override by exporting the variable).
+export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
 export MESA_D3D12_DEFAULT_INDEX_BUFFER_STRIDE_2_BYTE=1
 export PATH="$HOME/.local/bin:$PATH"
 export LLM_BACKEND="${LLM_BACKEND:-ollama}"

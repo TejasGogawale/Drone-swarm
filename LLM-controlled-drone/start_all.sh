@@ -9,6 +9,9 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DISPLAY="${DISPLAY:-:0}"
 export PATH="/opt/ros/jazzy/opt/gz_tools_vendor/bin:$HOME/.local/bin:$PATH"
 export GALLIUM_DRIVER=d3d12
+# WSL: Mesa's d3d12 driver picks adapter 0 (the Intel iGPU on Optimus laptops), which left the RTX unused
+# and Gazebo at ~0.1% real time. Select the NVIDIA adapter by name (override by exporting the variable).
+export MESA_D3D12_DEFAULT_ADAPTER_NAME="${MESA_D3D12_DEFAULT_ADAPTER_NAME:-NVIDIA}"
 export MESA_D3D12_DEFAULT_INDEX_BUFFER_STRIDE_2_BYTE=1
 export MESA_GL_VERSION_OVERRIDE=4.5
 export MESA_GLSL_VERSION_OVERRIDE=450
@@ -87,6 +90,17 @@ for i in 0 1 2 3; do
   "$PX4_BIN-param" --instance $i set NAV_DLL_ACT 0 2>/dev/null || true
   "$PX4_BIN-param" --instance $i set NAV_RCL_ACT 0 2>/dev/null || true
   "$PX4_BIN-param" --instance $i set COM_RCL_EXCEPT 4 2>/dev/null || true
+  # Steady flight (steady camera): gentle limits so the airframe never leans hard or snaps in yaw
+  "$PX4_BIN-param" --instance $i set MPC_XY_VEL_MAX 4.5 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_Z_VEL_MAX_UP 2.0 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_Z_VEL_MAX_DN 1.5 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_ACC_HOR 2.0 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_ACC_HOR_MAX 3.0 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_ACC_UP_MAX 2.5 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_ACC_DOWN_MAX 2.0 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_TILTMAX_AIR 20 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MC_YAWRATE_MAX 60 2>/dev/null || true
+  "$PX4_BIN-param" --instance $i set MPC_YAWRAUTO_MAX 30 2>/dev/null || true
 done
 
 echo "[3/3] Starting 4-Drone Swarm Agent (ROS 2 Decentralized GNN/Heuristic Brain + YOLOv8 + Live 2D/3D Swarm GUI)..."

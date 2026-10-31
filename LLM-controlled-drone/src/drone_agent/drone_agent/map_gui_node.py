@@ -17,9 +17,11 @@ Features:
 
 import json
 import math
+import os
 import threading
 import time
 import tkinter as tk
+from tkinter import ttk
 from collections import deque
 
 import cv2
@@ -32,6 +34,12 @@ from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, LaserScan, PointCloud2
 from std_msgs.msg import String
+
+from drone_agent.rescue_coordinator import RescueCoordinator
+from drone_agent.rover_nav import NavParams, Rover
+from drone_agent.voxel_map import VoxelMap
+from drone_agent.voxel_viewer import ROVER_COLORS, Scene, ViewOptions, VoxelViewer
+from drone_agent.world_sim import Detection, SimDetector, World
 
 
 def imgmsg_to_cv2_safe(bridge: CvBridge, msg: Image) -> np.ndarray | None:
@@ -205,6 +213,36 @@ class MapGuiNode(Node):
         self.world_boxes, self.world_cyls = self._get_world_obstacles()
         self.create_timer(0.2, self._collaborative_4drone_lidar_tick)
 
+        # ── 3-D voxel map, rescue rovers and coordinator ──────────────────
+        # The voxel map is fed by the same (simulated) LiDAR the 2-D map uses, plus any real PointCloud2/LaserScan.
+        self.vmap = VoxelMap(res=0.5, half=self.grid_half_m)
+        self.sim_world = World()          # same obstacle list as MapGuiNode._get_world_obstacles()
+        self.nav_params = NavParams()
+        self.rovers = [Rover(0, 'Rover 1', ROVER_COLORS[0], -2.0, 5.0, yaw=math.pi / 2),
+                       Rover(1, 'Rover 2', ROVER_COLORS[1], 2.0, -5.0, yaw=-math.pi / 2)]
+        self.coord = RescueCoordinator(self.vmap, self.sim_world, self.rovers, self.nav_params)
+        self.sim_detector = SimDetector(self.sim_world)
+        self.det_source = 'sim'                       # 'sim' | 'swarm' | 'both' | 'off'
+        self.rescue_lock = threading.RLock()
+        self.viewer = VoxelViewer(self.vmap, ViewOptions())
+        self.viewer.cam.auto_orbit = False
+        self.use_legacy_viewer = False
+        self.drone_trails3d: list[deque] = [deque(maxlen=500) for _ in range(4)]
+        self._last_trail_t = 0.0
+        self._last_rescue_t = time.monotonic()
+        self._last_det_t = 0.0
+        self._lidar_tick_n = 0
+        self.swarm_victims: list[dict] = []
+        self.create_subscription(String, '/swarm/victims', self._swarm_victims_cb, 10)
+        self.create_timer(0.05, self._rescue_tick)
+
+        # Rover cameras: first-person views rendered from the voxel map (SIMULATED cameras: the rovers are not in Gazebo).
+        # Rendered on a worker thread at ~4 Hz so the GUI and ROS callbacks never wait for them.
+        self.rover_viewers = [VoxelViewer.first_person(self.viewer) for _ in self.rovers]
+        self.rover_cam_frames: list = [None] * len(self.rovers)
+        self._rover_cam_stop = False
+        threading.Thread(target=self._rover_cam_loop, daemon=True).start()
+
         self.get_logger().info('4-Drone Swarm 2D Tactical Map + Multi-Camera + 3D OctoMap GUI initialized.')
 
     @staticmethod
@@ -240,6 +278,7 @@ class MapGuiNode(Node):
             self.voxels_3d.clear()
             for k in self.drone_scan_endpoints:
                 self.drone_scan_endpoints[k].clear()
+        self.reset_rescue(clear_map=True)
         self.get_logger().info('Cleared collaborative 4-drone OctoMap & occupancy grid.')
 
     def send_user_command(self, text: str):
@@ -345,7 +384,13 @@ class MapGuiNode(Node):
         origin_e: float,
         hit_points_ned: list[tuple[float, float, float]],
         free_endpoints_ned: list[tuple[float, float]],
+        feed_voxel_map: bool = True,
     ):
+        if feed_voxel_map:
+            # real sensor data (PointCloud2 / LaserScan) goes into the probabilistic voxel map as well
+            alt = max(0.5, -self.z) if drone_id == 0 else 1.0
+            self.vmap.integrate_points((origin_n, origin_e, alt), hit_points_ned, free_endpoints_ned,
+                                       agent_bit=1 << drone_id)
         with self.scan_lock:
             d_gx, d_gy = self._ned_to_grid(origin_n, origin_e)
             for fn, fe in free_endpoints_ned:
@@ -472,7 +517,198 @@ class MapGuiNode(Node):
                 if not ray_hit:
                     frees.append((dx + max_range * ca, dy + max_range * sa))
 
-            self._integrate_drone_scan(did, dx, dy, hits, frees)
+            self._integrate_drone_scan(did, dx, dy, hits, frees, feed_voxel_map=False)
+
+            # dense scan of the same world for the voxel map (analytic ray casting, 192 rays, same visibility rule)
+            rays = self.sim_world.scan(dx, dy, alt_agl, dyaw, n_rays=192, max_range=max_range)
+            self.vmap.integrate_rays((dx, dy, alt_agl), rays, agent_bit=1 << did)
+            if self._lidar_tick_n % 5 == 0:           # roofs are static: refresh them once a second
+                self.vmap.integrate_surface(self.sim_world.roof_points(dx, dy, alt_agl, max_range))
+        self._lidar_tick_n += 1
+
+    # ══════════════════════════════════════════════════════════════════════════
+    # RESCUE ROVERS: detections -> coordinator -> OctoMap-based navigation
+    # ══════════════════════════════════════════════════════════════════════════
+    def reset_rescue(self, clear_map: bool = False):
+        with self.rescue_lock:
+            if clear_map:
+                self.vmap.clear()
+            self.sim_world.clear_dynamic()
+            starts = [(-2.0, 5.0, math.pi / 2), (2.0, -5.0, -math.pi / 2)]
+            for r, (n, e, yaw) in zip(self.rovers, starts):
+                r.n, r.e, r.yaw, r.v, r.w = n, e, yaw, 0.0, 0.0
+                r.state, r.mission_id, r.target, r.route, r.route_idx = 'idle', None, None, [], 0
+                r.trail.clear()
+                r.replans = r.bumps = 0
+            self.coord.missions.clear()
+            self.coord.queue.clear()
+            self.coord._by_survivor.clear()
+            self.coord.transmissions.clear()
+            self.sim_detector.seen.clear()
+
+    def set_det_source(self, mode: str):
+        self.det_source = mode
+
+    def set_allow_unknown(self, allow: bool):
+        self.nav_params.unknown_policy = 'penalize' if allow else 'forbid'
+
+    def drop_obstacle_on_route(self) -> bool:
+        """Demo/test: drop rubble on the route of the first navigating rover so it must replan."""
+        with self.rescue_lock:
+            for r in self.rovers:
+                if r.state != 'navigating' or len(r.route) < 2:
+                    continue
+                pts = [r.pos()] + r.route[r.route_idx:]
+                target_d, acc = 9.0, 0.0
+                for a, b in zip(pts[:-1], pts[1:]):
+                    seg = math.hypot(b[0] - a[0], b[1] - a[1])
+                    if acc + seg >= target_d and seg > 1e-6:
+                        f = (target_d - acc) / seg
+                        self.sim_world.add_dynamic_box(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, 3.0, 4.0, 1.4)
+                        self.coord.log('obstacle_dropped', rover=r.id)
+                        return True
+                    acc += seg
+        return False
+
+    def _swarm_victims_cb(self, msg: String):
+        try:
+            rep = json.loads(msg.data)
+        except Exception:
+            return
+        self.swarm_victims = [v for v in rep.get('victims', []) if v.get('confirmed')]
+
+    def _real_detections(self, now: float) -> list:
+        import zlib
+        out = []
+        for v in self.swarm_victims:
+            vid = v.get('id')
+            key = zlib.crc32('-'.join(vid).encode()) if isinstance(vid, list) else zlib.crc32(str(vid).encode())
+            owner = int(vid[0]) if isinstance(vid, list) and vid and str(vid[0]).isdigit() else 0
+            n, e = v['n_ned']
+            out.append(Detection(1000 + key % 100000, float(n), float(e), min(0.99, 0.5 + float(v.get('obs', 0)) / 60.0),
+                                 owner, now, 'swarm', 'YOLO victim'))
+        return out
+
+    def _drone_pos3(self, did: int):
+        with self.swarm_lock:
+            d = self.swarm_drones[did]
+            return (float(d['x']), float(d['y']), max(0.0, -float(d['z'])))
+
+    def _rescue_tick(self):
+        now = time.monotonic()
+        dt = min(0.2, now - self._last_rescue_t)
+        self._last_rescue_t = now
+        with self.swarm_lock:
+            drones = [dict(d) for d in self.swarm_drones]
+        if now - self._last_trail_t > 0.4:
+            self._last_trail_t = now
+            for i, d in enumerate(drones[:4]):
+                self.drone_trails3d[i].append((float(d['x']), float(d['y']), max(0.0, -float(d['z']))))
+        with self.rescue_lock:
+            if now - self._last_det_t > 0.5 and self.det_source != 'off':
+                self._last_det_t = now
+                dets = []
+                if self.det_source in ('sim', 'both'):
+                    dets += self.sim_detector.step(drones, self.coord.t)
+                if self.det_source in ('swarm', 'both'):
+                    dets += self._real_detections(self.coord.t)
+                for det in dets:
+                    self.coord.on_detection(det, drone_pos=self._drone_pos3(det.drone_id) if det.drone_id < 4 else None)
+            self.coord.tick(dt)
+
+    def _build_scene(self) -> Scene:
+        with self.swarm_lock:
+            drones = [dict(d) for d in self.swarm_drones]
+            comm_adj = [list(row) for row in self.comm_adj]
+        sc = Scene(now=self.coord.t, hub=(0.0, 0.0))
+        for i, d in enumerate(drones[:4]):
+            sc.drones.append(dict(id=i, name=d['name'], n=float(d['x']), e=float(d['y']), alt=max(0.0, -float(d['z'])),
+                                  yaw=float(d['yaw']), trail=list(self.drone_trails3d[i])))
+        for i in range(len(sc.drones)):
+            for j in range(i + 1, len(sc.drones)):
+                if i < len(comm_adj) and j < len(comm_adj[i]) and comm_adj[i][j] > 0.5:
+                    sc.links.append((i, j))
+        with self.rescue_lock:
+            routes = {r.id: [r.pos()] + r.route[r.route_idx:] for r in self.rovers if r.route and r.state in ('navigating', 'blocked')}
+            for r in self.rovers:
+                sc.rovers.append(dict(id=r.id, name=r.name, n=r.n, e=r.e, yaw=r.yaw, color=r.color, state=r.state,
+                                      wheel=r.wheel_phase, trail=list(r.trail)[-300:], route=routes.get(r.id, [])))
+            for m in self.coord.missions.values():
+                sc.survivors.append(dict(id=m.survivor_id, name=m.name, n=m.n, e=m.e, conf=m.conf, drone_id=m.drone_id,
+                                         state='rescued' if m.state == 'rescued' else 'detected', radius=3.0))
+            for tr in self.coord.transmissions:
+                item = dict(tr)
+                if tr['kind'] == 'to_coordinator' and tr.get('drone') is not None and tr['drone'] < 4:
+                    item['from'] = self._drone_pos3(tr['drone'])
+                if tr['kind'] == 'to_rover':
+                    rv = self.rovers[tr['rover']]
+                    item['rover_n'], item['rover_e'] = rv.n, rv.e
+                sc.transmissions.append(item)
+            lines = []
+            for m in list(self.coord.missions.values())[-5:]:
+                rv = f'Rover {m.rover_id + 1}' if m.rover_id is not None else 'unassigned'
+                lines.append(f'M{m.id} {m.name} conf {m.conf * 100:.0f}% UAV-{m.drone_id + 1} -> {rv}  {m.state}'
+                             f'  {m.route_len:.0f} m' + (f'  ({m.note})' if m.note else ''))
+            sc.stats = dict(self.coord.summary(), lines=lines)
+        src = {'sim': 'SIMULATED survivor detector', 'swarm': 'real YOLO registry (/swarm/victims)',
+               'both': 'simulated + real YOLO', 'off': 'detections OFF'}[self.det_source]
+        policy = 'unknown ground allowed' if self.nav_params.unknown_policy == 'penalize' else 'known-free ground only'
+        sc.source_label = f'DETECTIONS: {src} | MAP: simulated LiDAR on the world obstacle list | ROVER NAV: {policy}'
+        return sc
+
+    def focus_entity(self, kind: str, idx: int):
+        sc = self._build_scene()
+        try:
+            if kind == 'drone':
+                d = sc.drones[idx]
+                self.viewer.cam.focus((d['n'], d['e'], d['alt']), dist=45.0)
+            elif kind == 'rover':
+                r = sc.rovers[idx]
+                self.viewer.cam.focus((r['n'], r['e'], 0.5), dist=18.0)
+            elif kind == 'survivor':
+                s_ = sc.survivors[idx]
+                self.viewer.cam.focus((s_['n'], s_['e'], 1.0), dist=20.0)
+        except IndexError:
+            pass
+
+    def _rover_cam_loop(self):
+        while not self._rover_cam_stop:
+            time.sleep(0.4)
+            try:
+                sc = self._build_scene()
+                for i, rv in enumerate(sc.rovers):
+                    self.rover_viewers[i].geo = self.viewer.geo
+                    self.rover_cam_frames[i] = self.rover_viewers[i].render_pov(self.viewer, 384, 240, sc, rv)
+            except Exception:
+                pass
+
+    def _render_rover_cam(self, idx: int, w: int, h: int) -> np.ndarray:
+        """Rover camera feed with badge and mission banner (first-person view rendered from the voxel map)."""
+        w, h = max(140, int(w)), max(100, int(h))
+        col = tuple(int(c) for c in ROVER_COLORS[idx % 2])
+        frame = self.rover_cam_frames[idx] if idx < len(self.rover_cam_frames) else None
+        if frame is None:
+            img = np.full((h, w, 3), (26, 30, 28), np.uint8)
+            cv2.putText(img, 'rover camera starting...', (10, h // 2), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (160, 200, 180), 1, cv2.LINE_AA)
+        else:
+            img = cv2.resize(frame, (w, h))
+        with self.rescue_lock:
+            r = self.rovers[idx]
+            state, speed, yaw = r.state, r.v, r.yaw
+            dist = r.dist_to_end() if r.route else 0.0
+            m = self.coord.missions.get(r.mission_id) if r.mission_id is not None else None
+            mtxt = f'M{m.id} {m.name}' if m else 'no mission (idle)'
+        cv2.rectangle(img, (0, 0), (w, 24), (16, 22, 20), -1)
+        cv2.putText(img, f'ROVER {idx + 1} CAM [{state.upper()}]  SPD:{speed:3.1f}m/s  HDG:{(math.degrees(yaw) + 360) % 360:03.0f}  GOAL:{dist:4.1f}m',
+                    (8, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.36, col, 1, cv2.LINE_AA)
+        cv2.rectangle(img, (0, h - 22), (w, h), (16, 22, 20), -1)
+        cv2.putText(img, f'{mtxt[:34]}  | SIMULATED view from the voxel map', (8, h - 7),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.34, (200, 240, 255), 1, cv2.LINE_AA)
+        cv2.rectangle(img, (0, 0), (w - 1, h - 1), col, 2)
+        return img
+
+    def survivor_labels(self) -> list[str]:
+        return [f'{m.name} (M{m.id})' for m in self.coord.missions.values()]
 
     @staticmethod
     def _ned_to_px(north: float, east: float, cx: int, cy: int, scale: float) -> tuple[int, int]:
@@ -758,6 +994,15 @@ class MapGuiNode(Node):
                 '4-DRONE LIVE CAMERA MULTI-VIEW (Click any drone cam to enlarge/focus)',
                 (12, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 220), 2, cv2.LINE_AA
             )
+        elif self.cam_layout == 'rovers':
+            cam_pane = np.vstack([self._render_rover_cam(0, W, H // 2), self._render_rover_cam(1, W, H - H // 2)])
+            cv2.putText(cam_pane, 'ROVER CAMERAS (simulated first-person view from the voxel map)', (12, 44),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.46, (0, 255, 220), 1, cv2.LINE_AA)
+        elif isinstance(self.cam_layout, str) and self.cam_layout.startswith('r'):
+            ridx = int(self.cam_layout[1:])
+            cam_pane = self._render_rover_cam(ridx, W, H)
+            cv2.putText(cam_pane, f'FOCUSED CAMERA: ROVER {ridx + 1} (Click a camera button to switch)', (12, 44),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 200), 1, cv2.LINE_AA)
         else:
             focus_idx = int(self.cam_layout)
             cam_pane = self._render_drone_cam(focus_idx, W, H)
@@ -894,6 +1139,29 @@ class MapGuiNode(Node):
         return scan_img
 
     def _render_3d_octomap_viewer(self, W: int, H: int) -> np.ndarray:
+        if self.use_legacy_viewer:
+            return self._render_3d_octomap_viewer_legacy(W, H)
+        canvas = self.viewer.render(W, H, self._build_scene())
+        if W > 380 and H > 360:
+            pip_w, pip_h = 340, 240
+            qw, qh = pip_w // 2, pip_h // 2
+            cams = [self._render_drone_cam(i, qw, qh) for i in range(4)]
+            pip_grid = np.vstack([np.hstack([cams[0], cams[1]]), np.hstack([cams[2], cams[3]])])
+            px1, py1 = W - pip_w - 12, 44
+            cv2.rectangle(canvas, (px1 - 2, py1 - 2), (px1 + pip_w + 2, py1 + pip_h + 2), (0, 255, 200), 2)
+            canvas[py1:py1 + pip_h, px1:px1 + pip_w] = pip_grid
+            cv2.putText(canvas, 'SWARM 4-CAM PiP', (px1 + 8, py1 + 18), cv2.FONT_HERSHEY_SIMPLEX, 0.44, (0, 255, 200), 1, cv2.LINE_AA)
+            ry = py1 + pip_h + 8
+            rw, rh = pip_w // 2, 120
+            if ry + rh < H - 6:
+                for k in range(2):
+                    rc = self._render_rover_cam(k, rw, rh)
+                    canvas[ry:ry + rh, px1 + k * rw:px1 + (k + 1) * rw] = rc
+        cv2.putText(canvas, 'Left-drag: orbit | Right-drag: pan | Wheel: zoom | Double-click: reset',
+                    (10, H - 32), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (180, 225, 255), 1, cv2.LINE_AA)
+        return canvas
+
+    def _render_3d_octomap_viewer_legacy(self, W: int, H: int) -> np.ndarray:
         canvas = np.full((H, W, 3), (26, 32, 38), dtype=np.uint8)
 
         if self.auto_rotate_3d:
@@ -1077,6 +1345,13 @@ class DroneControlApp:
             b.pack(side=tk.LEFT, padx=2)
             self.btn_cam_drones.append(b)
 
+        self.btn_cam_rovers = []
+        for text, lay in (('ROVER CAMS', 'rovers'), ('ROVER 1 CAM', 'r0'), ('ROVER 2 CAM', 'r1')):
+            b = tk.Button(nav_frame, text=text, font=('DejaVu Sans', 9, 'bold'), padx=8, pady=3,
+                          command=lambda l=lay: self._set_cam_layout(l))
+            b.pack(side=tk.LEFT, padx=2)
+            self.btn_cam_rovers.append((b, lay))
+
         tk.Button(
             nav_frame, text='Clear Scanned Map', font=('DejaVu Sans', 9, 'bold'),
             bg='#4a2525', fg='#ffdede', padx=10, pady=3,
@@ -1084,7 +1359,7 @@ class DroneControlApp:
         ).pack(side=tk.RIGHT, padx=6, pady=4)
 
         self.btn_autorot = tk.Button(
-            nav_frame, text='3D Auto-Orbit: ON', font=('DejaVu Sans', 9, 'bold'),
+            nav_frame, text='3D Auto-Orbit: OFF', font=('DejaVu Sans', 9, 'bold'),
             bg='#244438', fg='#b0ffdf', padx=10, pady=3,
             command=self._toggle_autorot
         )
@@ -1099,6 +1374,12 @@ class DroneControlApp:
         self.video_label.bind('<B1-Motion>', self._on_mouse_drag)
         self.video_label.bind('<Button-4>', lambda _e: self._on_zoom(1.1))
         self.video_label.bind('<Button-5>', lambda _e: self._on_zoom(0.9))
+        self.video_label.bind('<MouseWheel>', self._on_wheel)
+        self.video_label.bind('<ButtonPress-3>', self._on_pan_down)
+        self.video_label.bind('<B3-Motion>', self._on_pan_drag)
+        self.video_label.bind('<ButtonPress-2>', self._on_pan_down)
+        self.video_label.bind('<B2-Motion>', self._on_pan_drag)
+        self.video_label.bind('<Double-Button-1>', self._on_double_click)
 
         # ── Bottom Interactive Command & Preset Panel ─────────────────────
         ctrl_frame = tk.Frame(self.root, bg='#1d2822', bd=1, relief=tk.RIDGE)
@@ -1154,6 +1435,10 @@ class DroneControlApp:
             )
             b.pack(side=tk.LEFT, padx=3)
 
+        self._build_viewer_controls()
+        self._last_snap = 0.0
+        if os.environ.get('SWARM_GUI_PAGE') == 'scanned_map':      # start directly on the 3D map page
+            self._switch_page('scanned_map')
         self._photo = None
         self.root.protocol('WM_DELETE_WINDOW', self._on_close)
         self._update_gui()
@@ -1161,6 +1446,102 @@ class DroneControlApp:
     def _switch_page(self, page_name: str):
         self.active_page = page_name
         self._update_nav_buttons()
+        if page_name == 'scanned_map':
+            self.viewer_ctrl.pack(side=tk.TOP, fill=tk.X, padx=8, pady=2, before=self.video_label)
+        else:
+            self.viewer_ctrl.pack_forget()
+
+    # ── 3-D viewer controls: layers, thresholds, views, focus, rover operations ──
+    def _build_viewer_controls(self):
+        node = self.node
+        o = node.viewer.opts
+        bg = '#1d2822'
+        f = tk.Frame(self.root, bg=bg, bd=1, relief=tk.RIDGE)
+        self.viewer_ctrl = f
+        lab = dict(bg=bg, fg='#90e0c0', font=('DejaVu Sans', 9, 'bold'))
+        chk = dict(bg=bg, fg='#e0fff4', selectcolor='#0f1713', activebackground=bg, activeforeground='#ffffff',
+                   font=('DejaVu Sans', 9))
+
+        row1 = tk.Frame(f, bg=bg)
+        row1.pack(fill=tk.X, padx=6, pady=(4, 0))
+        tk.Label(row1, text='LAYERS:', **lab).pack(side=tk.LEFT, padx=(0, 4))
+        layers = [('Occupied', 'show_occupied'), ('Ground vox', 'show_ground_voxels'), ('Obstacle vox', 'show_obstacle_voxels'),
+                  ('Free space', 'show_free'), ('Unknown', 'show_unknown'), ('Recent', 'show_recent'),
+                  ('New obstacles', 'show_new_obstacles'), ('Coverage', 'show_coverage'), ('Shadows', 'show_shadows'),
+                  ('AO', 'show_ao'), ('Edges', 'show_edges'), ('Trails', 'show_trails'), ('Routes', 'show_routes'),
+                  ('Survivors', 'show_survivors')]
+        self._layer_vars = {}
+        for label, attr in layers:
+            var = tk.BooleanVar(value=getattr(o, attr))
+            self._layer_vars[attr] = var
+            tk.Checkbutton(row1, text=label, variable=var, command=lambda a=attr, v=var: setattr(o, a, bool(v.get())),
+                           **chk).pack(side=tk.LEFT, padx=2)
+
+        row2 = tk.Frame(f, bg=bg)
+        row2.pack(fill=tk.X, padx=6, pady=(0, 0))
+
+        def slider(text, attr, lo, hi, step, width=95):
+            tk.Label(row2, text=text, **lab).pack(side=tk.LEFT, padx=(6, 1))
+            sc = tk.Scale(row2, from_=lo, to=hi, resolution=step, orient=tk.HORIZONTAL, length=width, showvalue=True,
+                          bg=bg, fg='#e0fff4', troughcolor='#0f1713', highlightthickness=0, font=('DejaVu Sans', 8),
+                          command=lambda v, a=attr: setattr(o, a, float(v)))
+            sc.set(getattr(o, attr))
+            sc.pack(side=tk.LEFT)
+
+        slider('Occ. thr', 'occ_threshold', 0.5, 0.97, 0.01)
+        slider('Z min', 'z_min', 0.0, 20.0, 0.5)
+        slider('Z max', 'z_max', 1.0, 60.0, 1.0)
+        slider('Opacity', 'opacity', 0.2, 1.0, 0.05)
+        slider('Voxel size', 'voxel_scale', 0.4, 1.0, 0.05)
+        tk.Label(row2, text='Colour', **lab).pack(side=tk.LEFT, padx=(8, 2))
+        self._color_mode = tk.StringVar(value=o.color_mode)
+        cb = ttk.Combobox(row2, textvariable=self._color_mode, values=['height', 'occupancy', 'age', 'class'],
+                          width=9, state='readonly')
+        cb.pack(side=tk.LEFT)
+        cb.bind('<<ComboboxSelected>>', lambda _e: setattr(o, 'color_mode', self._color_mode.get()))
+
+        row3 = tk.Frame(f, bg=bg)
+        row3.pack(fill=tk.X, padx=6, pady=(0, 4))
+        btn = dict(font=('DejaVu Sans', 9, 'bold'), bg='#2b3d34', fg='#e0fff4', activebackground='#3e584b', padx=6, pady=1)
+        tk.Label(row3, text='VIEW:', **lab).pack(side=tk.LEFT, padx=(0, 3))
+        for text, name in (('Top', 'top'), ('Side', 'side'), ('Isometric', 'iso'), ('Orbit', 'orbit')):
+            tk.Button(row3, text=text, command=lambda n=name: node.viewer.cam.preset(n), **btn).pack(side=tk.LEFT, padx=1)
+        tk.Button(row3, text='Reset', command=node.viewer.cam.reset, **btn).pack(side=tk.LEFT, padx=1)
+
+        tk.Label(row3, text='FOCUS:', **lab).pack(side=tk.LEFT, padx=(10, 3))
+        self._focus_var = tk.StringVar(value='UAV-1')
+        self._focus_box = ttk.Combobox(row3, textvariable=self._focus_var, width=18, state='readonly',
+                                       values=self._focus_values())
+        self._focus_box.pack(side=tk.LEFT)
+        self._focus_box.bind('<Button-1>', lambda _e: self._focus_box.configure(values=self._focus_values()))
+        tk.Button(row3, text='Go', command=self._do_focus, **btn).pack(side=tk.LEFT, padx=2)
+
+        tk.Label(row3, text='ROVERS:', **lab).pack(side=tk.LEFT, padx=(12, 3))
+        tk.Label(row3, text='detections', bg=bg, fg='#c0e0d0', font=('DejaVu Sans', 8)).pack(side=tk.LEFT)
+        self._det_var = tk.StringVar(value='Simulated detector')
+        self._det_names = {'Simulated detector': 'sim', 'Real YOLO registry': 'swarm', 'Both': 'both', 'Off': 'off'}
+        dcb = ttk.Combobox(row3, textvariable=self._det_var, values=list(self._det_names), width=17, state='readonly')
+        dcb.pack(side=tk.LEFT, padx=2)
+        dcb.bind('<<ComboboxSelected>>', lambda _e: node.set_det_source(self._det_names[self._det_var.get()]))
+        self._unknown_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(row3, text='Allow unknown ground', variable=self._unknown_var,
+                       command=lambda: node.set_allow_unknown(self._unknown_var.get()), **chk).pack(side=tk.LEFT, padx=4)
+        tk.Button(row3, text='Drop rubble on route', command=node.drop_obstacle_on_route, **btn).pack(side=tk.LEFT, padx=2)
+        tk.Button(row3, text='Reset rovers', command=lambda: node.reset_rescue(False), **btn).pack(side=tk.LEFT, padx=2)
+
+    def _focus_values(self):
+        vals = [f'UAV-{i + 1}' for i in range(4)] + ['Rover 1', 'Rover 2']
+        vals += [f'Survivor: {lbl}' for lbl in self.node.survivor_labels()]
+        return vals
+
+    def _do_focus(self):
+        v = self._focus_var.get()
+        if v.startswith('UAV-'):
+            self.node.focus_entity('drone', int(v[4:]) - 1)
+        elif v.startswith('Rover'):
+            self.node.focus_entity('rover', int(v[6:]) - 1)
+        elif v.startswith('Survivor'):
+            self.node.focus_entity('survivor', max(0, self._focus_values().index(v) - 6))
 
     def _set_cam_layout(self, layout):
         self.node.cam_layout = layout
@@ -1174,8 +1555,15 @@ class DroneControlApp:
             self.btn_page_tactical.configure(bg='#283830', fg='#c0e0d0')
             self.btn_page_scanned.configure(bg='#00d8ff', fg='#000000')
 
+        for b, lay in self.btn_cam_rovers:
+            on = self.node.cam_layout == lay
+            b.configure(bg='#ffb020' if on else '#283830', fg='#000000' if on else '#c0e0d0')
         if self.node.cam_layout == 'quad':
             self.btn_cam_quad.configure(bg='#00e699', fg='#000000')
+            for b in self.btn_cam_drones:
+                b.configure(bg='#283830', fg='#c0e0d0')
+        elif isinstance(self.node.cam_layout, str):
+            self.btn_cam_quad.configure(bg='#283830', fg='#c0e0d0')
             for b in self.btn_cam_drones:
                 b.configure(bg='#283830', fg='#c0e0d0')
         else:
@@ -1187,8 +1575,10 @@ class DroneControlApp:
                     b.configure(bg='#283830', fg='#c0e0d0')
 
     def _toggle_autorot(self):
-        self.node.auto_rotate_3d = not self.node.auto_rotate_3d
-        state = 'ON' if self.node.auto_rotate_3d else 'OFF'
+        cam = self.node.viewer.cam
+        cam.auto_orbit = not cam.auto_orbit
+        self.node.auto_rotate_3d = cam.auto_orbit
+        state = 'ON' if cam.auto_orbit else 'OFF'
         self.btn_autorot.configure(text=f'3D Auto-Orbit: {state}')
 
     def _on_mouse_down(self, event):
@@ -1209,18 +1599,36 @@ class DroneControlApp:
                 else:
                     self._set_cam_layout('quad')
 
+    def _in_3d_pane(self, x: int) -> bool:
+        return self.active_page == 'scanned_map' and x >= max(1100, self.video_label.winfo_width()) // 2
+
     def _on_mouse_drag(self, event):
-        if self._drag_last is not None and self.active_page == 'scanned_map':
+        if self._drag_last is not None and self._in_3d_pane(event.x):
             dx = event.x - self._drag_last[0]
             dy = event.y - self._drag_last[1]
-            self.node.auto_rotate_3d = False
+            self.node.viewer.cam.orbit(-dx * 0.45, dy * 0.35)
             self.btn_autorot.configure(text='3D Auto-Orbit: OFF')
-            self.node.view_azim = (self.node.view_azim + dx * 0.45) % 360.0
-            self.node.view_elev = max(10.0, min(80.0, self.node.view_elev + dy * 0.35))
         self._drag_last = (event.x, event.y)
 
+    def _on_pan_down(self, event):
+        self._pan_last = (event.x, event.y)
+
+    def _on_pan_drag(self, event):
+        last = getattr(self, '_pan_last', None)
+        if last is not None and self._in_3d_pane(event.x):
+            self.node.viewer.cam.pan(event.x - last[0], event.y - last[1], max(1, self.video_label.winfo_height()))
+        self._pan_last = (event.x, event.y)
+
     def _on_zoom(self, factor: float):
-        self.node.view_zoom = max(0.5, min(2.5, self.node.view_zoom * factor))
+        self.node.viewer.cam.zoom(factor)
+
+    def _on_wheel(self, event):
+        if self._in_3d_pane(event.x):
+            self._on_zoom(1.1 if event.delta > 0 else 0.9)
+
+    def _on_double_click(self, event):
+        if self._in_3d_pane(event.x):
+            self.node.viewer.cam.reset()
 
     def _on_send(self, _event=None):
         text = self.cmd_entry.get().strip()
@@ -1248,6 +1656,11 @@ class DroneControlApp:
             else:
                 bgr = self.node.render_scanned_map_page(pane_w=pane_w, pane_h=pane_h)
 
+            snap_dir = os.environ.get('SWARM_GUI_SNAPSHOT')            # optional: save what the GUI shows (for checks)
+            if snap_dir and time.time() - self._last_snap > 6.0:
+                self._last_snap = time.time()
+                os.makedirs(snap_dir, exist_ok=True)
+                cv2.imwrite(os.path.join(snap_dir, f'{self.active_page}.png'), bgr)
             rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             pil_img = PilImage.fromarray(rgb)
             self._photo = ImageTk.PhotoImage(image=pil_img)

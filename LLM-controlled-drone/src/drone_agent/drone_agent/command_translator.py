@@ -10,6 +10,8 @@ and neighboring swarm drones.
 import math
 import time
 
+import numpy as np
+
 from px4_msgs.msg import (
     OffboardControlMode,
     TrajectorySetpoint,
@@ -39,6 +41,8 @@ BUILDING_OBSTACLES_NED = [
     (-36.0, 0.0, 14.0, 10.0),    # Collapsed Police Station South
 ]
 
+
+from drone_agent.flight_smoothing import JerkLimitedCarrot, YawSmoother
 
 class CommandTranslator:
     """Translates LLM & Swarm commands to PX4 ROS2 messages with 3D wall + inter-drone avoidance."""
@@ -80,6 +84,7 @@ class CommandTranslator:
         self.target_z = -abs(default_alt_agl)  # Down (meters, NED — negative = up)
         self.target_yaw = float('nan')  # NaN = auto-face velocity/target
         self.target_speed = 4.0
+        self._tick_dt = 0.04
 
         # Orbit state
         self.orbiting = False
@@ -97,6 +102,19 @@ class CommandTranslator:
         self.square_alt_z = -abs(default_alt_agl)
         self.square_speed = 2.5
         self.square_threshold = 2.0  # meters — how close before moving to next wp
+
+        # Setpoint smoothing: the drone follows a jerk-limited carrot, not the raw target (steady camera)
+        self.carrot = JerkLimitedCarrot(vmax_xy=2.5, amax_xy=0.8, jmax=1.2)    # gentle cruise: a steady camera beats a fast one
+        self.yaw_smoother = YawSmoother(rate_max_deg=6.0, acc_max_deg=10.0)   # slow, so the camera never whips
+        self._hdg_vec = np.zeros(2)          # low-passed direction of travel (unit-ish vector)
+        self.current_yaw = float('nan')
+        self._last_tick_t = None
+        # Gazebo often runs slower than real time. The smoother must advance in SIMULATION time, otherwise a
+        # carrot limited to 0.8 m/s^2 in wall time is 3x harsher in sim time when the real-time factor is 0.58.
+        self.rtf = 1.0
+        self._clk_sim = None
+        self._clk_wall = None
+        self._facing_target = False
 
     def update_peers(self, peers_ned: list[tuple[float, float, float]]):
         """Update positions of other swarm drones for inter-drone repulsion."""
@@ -164,6 +182,21 @@ class CommandTranslator:
         self.lidar_repulse_n = max(-4.0, min(4.0, float(repulse_n)))
         self.lidar_repulse_e = max(-4.0, min(4.0, float(repulse_e)))
 
+    def update_sim_time(self, sim_s: float):
+        """Feed PX4's odometry timestamp (seconds, simulation clock) to estimate the real-time factor."""
+        wall = time.monotonic()
+        if self._clk_sim is None:
+            self._clk_sim, self._clk_wall = float(sim_s), wall
+            return
+        if wall - self._clk_wall >= 0.5:
+            inst = (float(sim_s) - self._clk_sim) / (wall - self._clk_wall)
+            if math.isfinite(inst) and inst > 0.0:
+                self.rtf = float(np.clip(0.7 * self.rtf + 0.3 * inst, 0.05, 1.5))
+            self._clk_sim, self._clk_wall = float(sim_s), wall
+
+    def update_yaw(self, yaw: float):
+        self.current_yaw = float(yaw)
+
     def update_position(self, x: float, y: float, z: float):
         """Update the drone's current World NED position for waypoint tracking."""
         self.current_x = float(x)
@@ -230,11 +263,10 @@ class CommandTranslator:
             if yaw is not None:
                 self.target_yaw = float(yaw)
             else:
-                # Face direction of travel
-                dx = self.target_x - self.current_x
-                dy = self.target_y - self.current_y
-                if math.hypot(dx, dy) > 1.0:
-                    self.target_yaw = math.atan2(dy, dx)
+                # No commanded heading: let the setpoint smoother choose it from the direction of travel.
+                # (This used to set yaw to the bearing of every NEW target, so each re-allocation by the
+                # swarm brain, about every 8 s, spun the camera round to face the new goal.)
+                self.target_yaw = float('nan')
             self.orbiting = False
             self.square_active = False
             messages.extend(self._arm_and_offboard())
@@ -370,6 +402,10 @@ class CommandTranslator:
         """Generate the current TrajectorySetpoint (in PX4 local frame) for the 10Hz publish loop."""
         msg = TrajectorySetpoint()
         msg.timestamp = int(time.time() * 1e6)
+        now = time.monotonic()
+        wall_dt = 0.04 if self._last_tick_t is None else min(0.5, max(0.005, now - self._last_tick_t))
+        self._tick_dt = min(0.25, max(0.002, wall_dt * self.rtf))      # simulation-time step
+        self._last_tick_t = now
 
         # Safe vertical takeoff climb: if drone is currently low (< 4.2m AGL) and needs to fly higher,
         # climb straight up first before translating horizontally so it never clips cars/rubble!
@@ -383,7 +419,7 @@ class CommandTranslator:
             world_n, world_e, world_d = self.apply_obstacle_avoidance(wp[0], wp[1], self.square_alt_z)
             yaw = math.atan2(world_e - self.current_y, world_n - self.current_x)
         elif self.orbiting:
-            dt = 0.1  # 10Hz tick
+            dt = self._tick_dt
             angular_vel = self.orbit_speed / max(self.orbit_radius, 1.0)
             self.orbit_angle += angular_vel * dt
 
@@ -406,22 +442,43 @@ class CommandTranslator:
             dn = world_n - self.current_x
             de = world_e - self.current_y
             dist = math.hypot(dn, de)
-            if dist > 1.2:
-                yaw = math.atan2(de, dn)
-            else:
-                yaw = self.target_yaw
+            # Heading policy for the default waypoint flight: an explicit commanded yaw wins; otherwise
+            # turn toward the direction of travel only as fast as a slow low-pass of the velocity allows.
+            # (The old code snapped yaw to the bearing of the target; the allocator flips targets every ~8 s,
+            # so the camera was whipped through up to 180 degrees each time.)
+            yaw = self.target_yaw
+
+        # Smooth: the setpoint is the carrot (limited speed / acceleration / jerk), with velocity and
+        # acceleration feed-forward, instead of the raw target that PX4 would chase at full authority.
+        cur = np.array([self.current_x, self.current_y, self.current_z])
+        if not self.carrot.ready or float(np.linalg.norm(self.carrot.p - cur)) > 6.0:
+            self.carrot.reset(cur)                    # first tick, or the drone was moved/landed: re-sync
+        p, v, a = self.carrot.step([world_n, world_e, world_d], self._tick_dt)
+        if not self.yaw_smoother.ready:
+            self.yaw_smoother.reset(self.current_yaw if math.isfinite(self.current_yaw) else 0.0)
+        speed_xy = math.hypot(float(v[0]), float(v[1]))
+        if speed_xy > 1.2:
+            alpha = min(1.0, self._tick_dt / 6.0)
+            self._hdg_vec = (1 - alpha) * self._hdg_vec + alpha * np.array([v[0], v[1]]) / speed_xy
+        if yaw is not None and math.isfinite(yaw):
+            want_yaw = yaw
+        elif float(np.linalg.norm(self._hdg_vec)) > 0.8:        # only a CONSISTENT direction of travel turns the camera
+            want_yaw = math.atan2(float(self._hdg_vec[1]), float(self._hdg_vec[0]))
+        else:
+            want_yaw = float('nan')                    # hold the current heading
+        yaw_s, yaw_rate = self.yaw_smoother.step(want_yaw, self._tick_dt)
 
         # Convert World NED setpoint to this drone's PX4 local EKF2 frame
         msg.timestamp = int(time.time() * 1e6)
-        msg.position[0] = float(world_n - self.frame_offset_x)
-        msg.position[1] = float(world_e - self.frame_offset_y)
-        msg.position[2] = float(world_d)
+        msg.position[0] = float(p[0] - self.frame_offset_x)
+        msg.position[1] = float(p[1] - self.frame_offset_y)
+        msg.position[2] = float(p[2])
         nan = float('nan')
-        msg.velocity = [nan, nan, nan]
-        msg.acceleration = [nan, nan, nan]
+        msg.velocity = [float(v[0]), float(v[1]), float(v[2])]
+        msg.acceleration = [float(a[0]), float(a[1]), float(a[2])]
         msg.jerk = [nan, nan, nan]
-        msg.yaw = float(yaw)
-        msg.yawspeed = nan
+        msg.yaw = float(yaw_s)
+        msg.yawspeed = float(yaw_rate)
         return msg
 
     def get_offboard_control_mode(self) -> OffboardControlMode:

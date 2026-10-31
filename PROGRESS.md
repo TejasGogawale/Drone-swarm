@@ -205,3 +205,55 @@ crops; (6) add a thermal-like second sensor if a mannequin/poster false positive
 `_get_disaster_targets_ned()`. Off by default: `/yolo/detections`, the annotated video and the GUI now
 show only real YOLO boxes (fewer/no "lock-ons" if yolov8n misses the SDF humans). On: old demo look,
 with a startup warning. Not run on ROS/Gazebo (syntax-checked only).
+
+## WSL run — root cause of "drones don't fly / cameras dead" and live result (2026-10-31)
+- ROOT CAUSE: Gazebo ran at ~0.1% real time (real_time_factor 0.0009). Mesa's d3d12 driver chose adapter 0,
+  the Intel UHD iGPU, so the RTX 3050 sat at 0%. Same with the original, unmodified start_all.sh.
+  FIX: `export MESA_D3D12_DEFAULT_ADAPTER_NAME="${...:-NVIDIA}"` in start_all.sh and launch_drone.sh.
+  After the fix: real_time_factor ~0.7, drones reach their 9-13.5 m altitudes, camera topics publish.
+- `ros2 topic hz` on the camera topics reports "no messages" even when they flow (use `echo --once`).
+- Workspace `LLM-controlled-drone/install` was stale (no gt_overlay / raw_detections / victim_registry);
+  rebuilt with `colcon build --packages-select drone_agent`.
+- LIVE RESULT, current code, overlay off, 4 drones, ~3 min: /swarm/victims reports 10 confirmed vs 9 real
+  people, but only 3 match a real person within 3 m; 7 are false/mislocalised tracks (two with 100+
+  observations near the origin) and 6 people are not found. The matching count is a coincidence.
+  Not fixed: suspects are camera/odometry frame conventions (PX4 FRD quaternion, yaw), the
+  flat-ground foot projection, YOLOv8n false positives on static objects, 640x480 camera.
+- Observed (not diagnosed): UAV-2..4 hold within ~2 m of one spot while UAV-1 patrols; the brain keeps
+  re-issuing far-corner goals (+42N,+39E) that they do not reach.
+- Temp files I left in the repo root: .stack.* .sample.* .ros_test.* .build_wsl.* ; WSL: ~/swarm_ws,
+  /home/tushar/Desktop/swarm symlink.
+
+## 3D voxel viewer rebuild + rescue rovers (2026-10-31)
+FINDINGS before changing anything: the "OctoMap" was not an OctoMap. `voxels_3d` was a dict of 1 m integer cells
+(cap 9000, no probability, no 3D free space) filled by a SIMULATED LiDAR that marched 48 rays through the hand-written
+obstacle list in `_get_world_obstacles()` (Gazebo drones have no LiDAR), one hit per 2 m of height, drawn as a fixed
+7 px square in a cv2 painter. That is why it looked like scattered dots. Old code kept as `_render_3d_octomap_viewer_legacy`.
+NEW (ROS-free, in drone_agent/): voxel_map.py (log-odds voxels, free space, ground coverage), world_sim.py (analytic
+dense LiDAR sim + roofs, dynamic obstacles, SIMULATED survivor detector), voxel_viewer.py (cube renderer, lighting, AO,
+shadows, colour modes, layers, orbit camera, rover/drone/survivor models, routes, transmissions, legend),
+rover_nav.py (traversability from the voxel map, A*, string-pulling, pure-pursuit rover, replanning),
+rescue_coordinator.py (dedupe, nearest-by-route dispatch, FIFO queue, mission state). map_gui_node.py page 2 uses them
+(Tk controls: layers, thresholds, height filter, opacity, voxel size, colour mode, views, focus, rover ops).
+TESTS: 77 pass (tests/test_rover_stack.py, test_voxel_viewer.py new). LIVE in WSL: 9/9 simulated survivors dispatched and
+rescued by 2 rovers; viewer ~5 fps inside the GUI while the machine is at load ~15 (84-124 ms/frame benchmark under load).
+NOT DONE / CAVEATS: detections are SIMULATED by default (real YOLO registry selectable, still inaccurate); rovers are
+simulated in the GUI, not Gazebo models; Tk controls and mouse not exercised by hand; rubble-replan verified in unit
+tests, not live; ambient occlusion/shadows are approximations (per-face AO, ground shadows only).
+
+## Drone stability + rover camera feeds (2026-10-31)
+MEASURED (scripts/flight_metrics.py, PX4 odometry, 60 s of flight, mean of 4 drones; SITL, so simulated physics):
+  original: tilt RMS 27.6 deg, body-rate p95 164 deg/s, yaw-rate p95 157 deg/s, accel RMS 5.6 m/s^2
+  final (run 8, all four healthy): tilt RMS 5.6 deg, body-rate p95 13.8 deg/s, yaw-rate p95 4.8 deg/s, accel RMS 0.9 m/s^2
+CAUSES: (1) raw far-away target sent as position setpoint at 10 Hz; (2) yaw setpoint snapped to the bearing of every
+new target (position_ned sets target_yaw) and flipped at a 1.2 m threshold; (3) swarm allocator re-targets each UAV every
+~8 s, ping-ponging between two nearby points (NOT fixed: coverage grid marks a 32 m radius explored at once, visit counts
+are reset at >94% coverage); (4) limits were in wall-clock time while Gazebo ran at ~0.58x real time => 3x harsher in
+sim time; (5) CPU oversubscription (load ~17 on 12 cores) starved a PX4 instance: EKF lost, "blind land", flyaway.
+FIXES: flight_smoothing.py (jerk-limited carrot + yaw smoother, 6 deg/s), setpoints with velocity/accel feed-forward at
+25 Hz, smoother steps in SIM time (rtf estimated from odometry timestamps), heading from low-passed consistent travel
+direction, gentler PX4 limits in start_all.sh, GUI at nice 12, YOLO ~3 inf/s/camera, rover cams at 2.5 Hz.
+ROVER CAMERAS: VoxelViewer.first_person + render_pov, worker thread; page 1 buttons ROVER CAMS / ROVER 1 CAM / ROVER 2 CAM
+and page-2 panels. SIMULATED views rendered from the voxel map (rovers are not Gazebo models).
+KNOWN: UAV-2 lost its estimator in two heavy-load runs (runs 6, 7); no repeat in run 8 after load cuts, but root cause
+(CPU starvation) is unproven; add a guard against following a diverging estimate.

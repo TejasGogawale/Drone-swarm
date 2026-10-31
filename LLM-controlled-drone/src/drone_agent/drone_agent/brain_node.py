@@ -171,6 +171,8 @@ class DroneUnit:
             self.state.armed = True
 
         self.translator.update_position(world_n, world_e, world_d)
+        self.translator.update_yaw(self.state.yaw)
+        self.translator.update_sim_time(float(msg.timestamp) * 1e-6)
 
     def _gps_cb(self, msg: VehicleGlobalPosition):
         if not self.translator.home_set and not math.isnan(msg.lat) and not math.isnan(msg.lon) and (abs(msg.lat) > 0.0001 or abs(msg.lon) > 0.0001):
@@ -253,7 +255,7 @@ class BrainNode(Node):
 
         # Parameters
         self.declare_parameter('llm_interval_sec', 7.0)
-        self.declare_parameter('offboard_rate_hz', 10.0)
+        self.declare_parameter('offboard_rate_hz', 25.0)
         self.declare_parameter('ollama_url', 'http://localhost:11434')
         self.declare_parameter('ollama_model', 'qwen2.5:3b')
 
@@ -311,6 +313,9 @@ class BrainNode(Node):
 
         # Timers
         period = 1.0 / offboard_rate
+        self._offboard_dt = period
+        self._state_every = max(1, int(round(offboard_rate / 10.0)))   # keep /swarm/state at ~10 Hz
+        self._loop_n = 0
         self.create_timer(period, self._offboard_swarm_loop)
         self.create_timer(0.25, self._decentralized_peer_broadcast_loop)
         self.create_timer(2.2, self._swarm_task_allocation_loop)
@@ -445,9 +450,12 @@ class BrainNode(Node):
             ]
             di.translator.update_peers(peers)
 
-        # 2. Tick 10Hz offboard control on all 4 drones
+        # 2. Tick offboard control on all 4 drones (25 Hz: smooth setpoints, PX4 sees a continuous reference)
         for d in self.drones:
-            d.tick_10hz(dt=0.1)
+            d.tick_10hz(dt=self._offboard_dt)
+        self._loop_n += 1
+        if self._loop_n % self._state_every:
+            return
 
         # 3. Publish combined swarm state on `/swarm/state` for GUI & monitoring
         states = [d.state for d in self.drones]
