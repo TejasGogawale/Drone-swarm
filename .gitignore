@@ -1,5 +1,9 @@
 # secrets
 .env
+.env.*
+*.key
+*.pem
+geminiAPIkEY.txt
 
 # Python
 __pycache__/
@@ -10,24 +14,43 @@ venv/
 *.egg-info/
 .pytest_cache/
 
-# ML training artifacts
+# ML training artifacts & weights
 train/checkpoints/
 train/runs/
-*.pt
 *.pth
 *.onnx
 *.torchscript
+*.pt
+!results/checkpoints/*.pt
+!yolov8n.pt
+!LLM-controlled-drone/yolov8n.pt
 
-# ROS build
+# ROS / colcon build artifacts
 ros_ws/build/
 ros_ws/install/
 ros_ws/log/
+LLM-controlled-drone/build/
+LLM-controlled-drone/install/
+LLM-controlled-drone/log/
+build/
+install/
+log/
+.colcon_install_layout
 
-# results (large)
+# External references & caches
+Ardupilot_Swarm/
+.vscode/
+.idea/
+
+# Large videos / bags
 results/videos/
 results/*.mp4
 results/*.bag
 
 # misc
 *.log
+*.err
+.*.err
+.*.sh
 .DS_Store
+LLM_respond.txt

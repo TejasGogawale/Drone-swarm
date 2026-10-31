@@ -1,0 +1,547 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sdf version="1.9">
+  <world name="drone_demo">
+    <physics type="ode">
+      <max_step_size>0.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <gravity>0 0 -9.8</gravity>
+    <magnetic_field>6e-06 2.3e-05 -4.2e-05</magnetic_field>
+    <atmosphere type="adiabatic"/>
+
+    <scene>
+      <grid>false</grid>
+      <ambient>0.62 0.60 0.58 1</ambient>
+      <background>0.72 0.78 0.85 1</background>
+      <shadows>false</shadows>
+    </scene>
+
+    <gui fullscreen="0">
+      <camera name="user_camera">
+        <pose>0 -24 20 0 0.62 1.570796</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
+    <!-- Main directional sunlight -->
+    <light name="sunUTC" type="directional">
+      <pose>0 0 500 0 0 0</pose>
+      <cast_shadows>false</cast_shadows>
+      <intensity>1.25</intensity>
+      <direction>0.001 0.625 -0.78</direction>
+      <diffuse>0.95 0.91 0.85 1</diffuse>
+      <specular>0.30 0.28 0.25 1</specular>
+    </light>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!--  POST-EARTHQUAKE GROUND & CRACKED ASPHALT STREETS                  -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <model name="ground_plane">
+      <static>true</static>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>1 1</size>
+            </plane>
+          </geometry>
+          <surface>
+            <friction><ode><mu>0.85</mu><mu2>0.85</mu2></ode></friction>
+          </surface>
+        </collision>
+        <visual name="earth_base">
+          <geometry>
+            <plane>
+              <normal>0 0 1</normal>
+              <size>400 400</size>
+            </plane>
+          </geometry>
+          <material>
+            <ambient>0.36 0.34 0.31 1</ambient>
+            <diffuse>0.44 0.41 0.37 1</diffuse>
+            <specular>0.05 0.05 0.05 1</specular>
+          </material>
+        </visual>
+
+        <!-- Central Disaster Plaza & Intersecting Asphalt Roads -->
+        <visual name="road_ew">
+          <pose>0 0 0.01 0 0 0</pose>
+          <geometry><box><size>140 12 0.02</size></box></geometry>
+          <material>
+            <ambient>0.20 0.20 0.22 1</ambient>
+            <diffuse>0.25 0.25 0.27 1</diffuse>
+          </material>
+        </visual>
+        <visual name="road_ns">
+          <pose>0 0 0.012 0 0 0</pose>
+          <geometry><box><size>12 140 0.02</size></box></geometry>
+          <material>
+            <ambient>0.20 0.20 0.22 1</ambient>
+            <diffuse>0.25 0.25 0.27 1</diffuse>
+          </material>
+        </visual>
+        <visual name="central_plaza_pavement">
+          <pose>0 0 0.008 0 0 0</pose>
+          <geometry><box><size>34 34 0.015</size></box></geometry>
+          <material>
+            <ambient>0.32 0.31 0.29 1</ambient>
+            <diffuse>0.38 0.37 0.35 1</diffuse>
+          </material>
+        </visual>
+        <!-- Helipad / Drone Home Pad at (0,0) -->
+        <visual name="helipad_circle">
+          <pose>0 0 0.02 0 0 0</pose>
+          <geometry><cylinder><radius>1.8</radius><length>0.01</length></cylinder></geometry>
+          <material>
+            <ambient>0.25 0.28 0.30 1</ambient>
+            <diffuse>0.30 0.35 0.38 1</diffuse>
+          </material>
+        </visual>
+        <visual name="helipad_ring">
+          <pose>0 0 0.025 0 0 0</pose>
+          <geometry><cylinder><radius>1.5</radius><length>0.012</length></cylinder></geometry>
+          <material>
+            <ambient>0.85 0.65 0.10 1</ambient>
+            <diffuse>0.95 0.75 0.12 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!--  REALISTIC 3D COLLAPSED BUILDINGS (OUTER RING r = 35..42m)          -->
+    <!--  Safe outer perimeter: drone orbits inside r <= 20m collision-free! -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- 1. Collapsed Fire Station (NE Sector: East=32, North=26 -> NED N=26, E=32) -->
+    <model name="collapsed_fire_station_ne">
+      <static>true</static>
+      <pose>32 26 0 0 0 -0.65</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed fire station/3/meshes/collapsed_fire_station.dae</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed fire station/3/meshes/collapsed_fire_station.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 2. Collapsed Police Station (NW Sector: East=-32, North=26 -> NED N=26, E=-32) -->
+    <model name="collapsed_police_station_nw">
+      <static>true</static>
+      <pose>-32 26 0 0 0 0.55</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed police station/3/meshes/collapsed_police_station.dae</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed police station/3/meshes/collapsed_police_station.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 3. Collapsed House SE (SE Sector: East=30, North=-24 -> NED N=-24, E=30) -->
+    <model name="collapsed_house_se">
+      <static>true</static>
+      <pose>30 -24 0 0 0 2.2</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <scale>1.5 1.5 1.5</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed house/4/meshes/collapsed_house.dae</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <scale>1.5 1.5 1.5</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed house/4/meshes/collapsed_house.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 4. Collapsed House SW (SW Sector: East=-30, North=-24 -> NED N=-24, E=-30) -->
+    <model name="collapsed_house_sw">
+      <static>true</static>
+      <pose>-30 -24 0 0 0 -0.8</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <scale>1.5 1.5 1.5</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed house/4/meshes/collapsed_house.dae</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <scale>1.5 1.5 1.5</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed house/4/meshes/collapsed_house.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 5. Collapsed House North (North Sector: East=0, North=36 -> NED N=36, E=0) -->
+    <model name="collapsed_house_north">
+      <static>true</static>
+      <pose>0 36 0 0 0 3.14159</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <scale>1.5 1.5 1.5</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed house/4/meshes/collapsed_house.dae</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <scale>1.5 1.5 1.5</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed house/4/meshes/collapsed_house.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 6. Collapsed Police Station South (South Sector: East=0, North=-36 -> NED N=-36, E=0) -->
+    <model name="collapsed_police_station_south">
+      <static>true</static>
+      <pose>0 -36 0 0 0 0.0</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed police station/3/meshes/collapsed_police_station.dae</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/collapsed police station/3/meshes/collapsed_police_station.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!--  REALISTIC 3D RESCUE & STRANDED VEHICLES                           -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- 1. Rescue Ambulance (East=11, North=-8 -> NED N=-8, E=11) -->
+    <model name="rescue_ambulance">
+      <static>true</static>
+      <pose>11 -8 0 0 0 0.45</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <scale>0.0254 0.0254 0.0254</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/ambulance/4/meshes/ambulance.obj</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <scale>0.0254 0.0254 0.0254</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/ambulance/4/meshes/ambulance.obj</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 2. Stranded Prius Car (East=12, North=3 -> NED N=3, E=12) -->
+    <model name="stranded_prius">
+      <static>true</static>
+      <pose>12 3 0 0 0 1.15</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <scale>0.01 0.01 0.01</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/prius hybrid/3/meshes/Hybrid.obj</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <scale>0.01 0.01 0.01</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/prius hybrid/3/meshes/Hybrid.obj</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- 3. Damaged SUV (East=-11, North=-3 -> NED N=-3, E=-11) -->
+    <model name="damaged_suv">
+      <static>true</static>
+      <pose>-11 -3 0 0 0 -0.85</pose>
+      <link name="link">
+        <collision name="collision">
+          <geometry>
+            <mesh>
+              <scale>0.06 0.06 0.06</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/suv/4/meshes/suv.obj</uri>
+            </mesh>
+          </geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <scale>0.06 0.06 0.06</scale>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/suv/4/meshes/suv.obj</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!--  REALISTIC 3D HUMAN MODELS: STANDING, WALKING & LYING VICTIMS      -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- A. WALKING HUMAN SURVIVORS (Animated 3D Skeletal Mesh) -->
+    <!-- Walking Survivor 1 (NE Plaza: East=6..10, North=8 -> NED N=8, E=6..10) -->
+    <actor name="walking_survivor_1">
+      <pose>6 8 1.0 0 0 0</pose>
+      <skin>
+        <filename>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/mingfei/models/actor/1/meshes/walk.dae</filename>
+        <scale>1.0</scale>
+      </skin>
+      <animation name="walk">
+        <filename>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/mingfei/models/actor/1/meshes/walk.dae</filename>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>0.0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walk">
+          <waypoint><time>0</time><pose>6 8 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>6</time><pose>10 8 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>7</time><pose>10 8 1.0 0 0 3.14159</pose></waypoint>
+          <waypoint><time>13</time><pose>6 8 1.0 0 0 3.14159</pose></waypoint>
+          <waypoint><time>14</time><pose>6 8 1.0 0 0 0</pose></waypoint>
+        </trajectory>
+      </script>
+    </actor>
+
+    <!-- Walking Survivor 2 (SW Plaza: East=-6..-10, North=-8 -> NED N=-8, E=-6..-10) -->
+    <actor name="walking_survivor_2">
+      <pose>-6 -8 1.0 0 0 3.14159</pose>
+      <skin>
+        <filename>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/mingfei/models/actor/1/meshes/walk.dae</filename>
+        <scale>1.0</scale>
+      </skin>
+      <animation name="walk">
+        <filename>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/mingfei/models/actor/1/meshes/walk.dae</filename>
+        <interpolate_x>true</interpolate_x>
+      </animation>
+      <script>
+        <loop>true</loop>
+        <delay_start>0.0</delay_start>
+        <auto_start>true</auto_start>
+        <trajectory id="0" type="walk">
+          <waypoint><time>0</time><pose>-6 -8 1.0 0 0 3.14159</pose></waypoint>
+          <waypoint><time>6</time><pose>-10 -8 1.0 0 0 3.14159</pose></waypoint>
+          <waypoint><time>7</time><pose>-10 -8 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>13</time><pose>-6 -8 1.0 0 0 0</pose></waypoint>
+          <waypoint><time>14</time><pose>-6 -8 1.0 0 0 3.14159</pose></waypoint>
+        </trajectory>
+      </script>
+    </actor>
+
+    <!-- B. STANDING HUMAN SURVIVORS (Photorealistic Textured 3D Meshes) -->
+    <!-- Standing Survivor Male 1 (East=4, North=10 -> NED N=10, E=4) -->
+    <model name="standing_survivor_male_1">
+      <static>true</static>
+      <pose>4 10 0 0 0 -1.9</pose>
+      <link name="link">
+        <collision name="person">
+          <pose>0 0 0.95 0 0 0</pose>
+          <geometry><box><size>0.55 0.38 1.90</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <pose>0 0 0.02 0.04 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/standing person/3/meshes/standing.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Standing Survivor Female 1 (East=-8, North=6 -> NED N=6, E=-8) -->
+    <model name="standing_survivor_female_1">
+      <static>true</static>
+      <pose>-8 6 0 0 0 -0.6</pose>
+      <link name="link">
+        <collision name="person">
+          <pose>0 0 0.88 0 0 0</pose>
+          <geometry><box><size>0.55 0.35 1.77</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <pose>0 0 0.02 0.04 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/casual female/4/meshes/casual_female.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Standing Survivor Male 2 near Ambulance (East=9, North=-5 -> NED N=-5, E=9) -->
+    <model name="standing_survivor_male_2">
+      <static>true</static>
+      <pose>9 -5 0 0 0 2.4</pose>
+      <link name="link">
+        <collision name="person">
+          <pose>0 0 0.95 0 0 0</pose>
+          <geometry><box><size>0.55 0.38 1.90</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <pose>0 0 0.02 0.04 0 0</pose>
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/standing person/3/meshes/standing.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- C. LYING-DOWN INJURED EARTHQUAKE VICTIMS (Photorealistic Textured 3D Humans Lying Flat) -->
+    <!-- Lying Victim Male 1 (East=2, North=9 -> NED N=9, E=2) -->
+    <model name="lying_victim_male_1">
+      <static>true</static>
+      <pose>2 9 0.22 1.5708 0 0.4</pose>
+      <link name="link">
+        <collision name="person_lying">
+          <pose>0 0 0.95 0 0 0</pose>
+          <geometry><box><size>0.55 0.38 1.90</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/standing person/3/meshes/standing.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Lying Victim Female 1 (East=-6, North=5 -> NED N=5, E=-6) -->
+    <model name="lying_victim_female_1">
+      <static>true</static>
+      <pose>-6 5 0.24 1.5708 0 -1.1</pose>
+      <link name="link">
+        <collision name="person_lying">
+          <pose>0 0 0.88 0 0 0</pose>
+          <geometry><box><size>0.55 0.35 1.77</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/casual female/4/meshes/casual_female.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Lying Victim Male 2 (East=-4, North=-9 -> NED N=-9, E=-4) -->
+    <model name="lying_victim_male_2">
+      <static>true</static>
+      <pose>-4 -9 0.22 1.5708 0 2.1</pose>
+      <link name="link">
+        <collision name="person_lying">
+          <pose>0 0 0.95 0 0 0</pose>
+          <geometry><box><size>0.55 0.38 1.90</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/standing person/3/meshes/standing.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Lying Victim Female 2 near Ambulance (East=7, North=-7 -> NED N=-7, E=7) -->
+    <model name="lying_victim_female_2">
+      <static>true</static>
+      <pose>7 -7 0.24 1.5708 0 -0.5</pose>
+      <link name="link">
+        <collision name="person_lying">
+          <pose>0 0 0.88 0 0 0</pose>
+          <geometry><box><size>0.55 0.35 1.77</size></box></geometry>
+        </collision>
+        <visual name="visual">
+          <geometry>
+            <mesh>
+              <uri>file:///home/tushar/.gz/fuel/fuel.gazebosim.org/openrobotics/models/casual female/4/meshes/casual_female.dae</uri>
+            </mesh>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!--  GAZEBO HARMONIC SYSTEM PLUGINS                                     -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+    <plugin filename="gz-sim-physics-system" name="gz::sim::systems::Physics"/>
+    <plugin filename="gz-sim-user-commands-system" name="gz::sim::systems::UserCommands"/>
+    <plugin filename="gz-sim-scene-broadcaster-system" name="gz::sim::systems::SceneBroadcaster"/>
+    <plugin filename="gz-sim-sensors-system" name="gz::sim::systems::Sensors">
+      <render_engine>ogre2</render_engine>
+    </plugin>
+    <plugin filename="gz-sim-imu-system" name="gz::sim::systems::Imu"/>
+    <plugin filename="gz-sim-magnetometer-system" name="gz::sim::systems::Magnetometer"/>
+    <plugin filename="gz-sim-air-pressure-system" name="gz::sim::systems::AirPressure"/>
+    <plugin filename="gz-sim-navsat-system" name="gz::sim::systems::NavSat"/>
+
+    <spherical_coordinates>
+      <surface_model>EARTH_WGS84</surface_model>
+      <world_frame_orientation>ENU</world_frame_orientation>
+      <latitude_deg>47.397971057728974</latitude_deg>
+      <longitude_deg>8.546163739800146</longitude_deg>
+      <elevation>0</elevation>
+    </spherical_coordinates>
+  </world>
+</sdf>
